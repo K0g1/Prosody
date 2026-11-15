@@ -1,0 +1,16 @@
+.build/
+dist/
+.DS_Store
+.codex/*
+!.codex/environments/
+!.codex/environments/environment.toml
+*.xcuserstate
+DerivedData/
+.audit/
+audit/
+.swiftpm/
+*.log
+.env
+.env.*
+*.p12
+*.mobileprovision

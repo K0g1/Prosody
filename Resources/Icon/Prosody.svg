@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <title>Prosody — paperclip and audio waveform</title>
+  <desc>A silver and graphite open paperclip surrounding three rounded audio bars on a transparent background.</desc>
+  <defs>
+    <linearGradient id="silver" x1="360" y1="170" x2="660" y2="870" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E4E5E7"/>
+      <stop offset="0.52" stop-color="#8A8D93"/>
+      <stop offset="1" stop-color="#34373C"/>
+    </linearGradient>
+  </defs>
+  <path d="M 615 746 L 539 822 C 457 904 323 904 241 822 C 159 740 159 606 241 524 L 551 214 C 625 140 745 140 819 214 C 893 288 893 408 819 482 L 713 588 C 671 630 603 630 561 588 C 519 546 519 478 561 436 L 657 340"
+        stroke="url(#silver)" stroke-width="78" stroke-linecap="round"/>
+  <path d="M 324 660 V 724 M 416 602 V 770 M 508 654 V 718"
+        stroke="url(#silver)" stroke-width="68" stroke-linecap="round"/>
+</svg>

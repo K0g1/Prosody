@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3ecdf">
+  <title>Prosody handbook</title>
+  <meta name="description" content="A one-page handbook for installing, setting up, recording, dictating, finding transcripts, and understanding local data in Prosody.">
+  <link rel="icon" href="../assets/logo.png" type="image/png">
+  <link rel="stylesheet" href="../assets/base.css">
+  <link rel="stylesheet" href="../assets/guide.css">
+</head>
+<body class="guide-page">
+  <a class="skip-link" href="#main-content">Skip to the handbook</a>
+
+  <header class="site-header">
+    <div class="shell masthead">
+      <a class="wordmark" href="../"><img src="../assets/logo.png" width="36" height="36" alt="">Prosody</a>
+      <nav aria-label="Primary">
+        <a href="../#workflow">How it works</a>
+        <a href="../#privacy">Privacy</a>
+        <a href="./" aria-current="page">Guide</a>
+        <a href="#source-terms">Source terms</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main-content" class="guide-main" tabindex="-1">
+    <div class="guide-shell guide-layout">
+      <nav class="guide-rail guide-toc" aria-labelledby="guide-toc-title">
+          <p class="guide-toc-title" id="guide-toc-title">On this page</p>
+          <ul>
+            <li><a href="#start">Start here</a></li>
+            <li><a href="#install">Build and source</a></li>
+            <li><a href="#setup">First setup</a></li>
+            <li><a href="#permissions">Permissions</a></li>
+            <li><a href="#tray-elements">Menu bar and Tray Elements</a></li>
+            <li><a href="#record">Record audio</a></li>
+            <li><a href="#dictation">Dictation</a></li>
+            <li><a href="#transcripts">Transcripts and recovery</a></li>
+            <li><a href="#labels">Labels</a></li>
+            <li><a href="#appearance">Appearance</a></li>
+            <li><a href="#notes-privacy">Notes and privacy</a></li>
+            <li><a href="#architecture">Architecture</a></li>
+            <li><a href="#local-data">Local data and backup</a></li>
+            <li><a href="#models">Models</a></li>
+            <li><a href="#troubleshooting">Troubleshooting</a></li>
+            <li><a href="#help">Help</a></li>
+          </ul>
+      </nav>
+
+      <article class="guide-handbook">
+        <header class="guide-hero">
+          <p class="guide-eyebrow">Beta 1 · macOS 15 or later · Apple silicon</p>
+          <h1>Prosody handbook</h1>
+          <p class="guide-lede">Record system audio or your microphone, transcribe on your Mac, dictate into the app you are already using, and keep searchable Markdown transcripts.</p>
+          <p class="guide-note">Press <kbd>⌘F</kbd> in your browser to find a feature or setting on this page. Try “Include Dictation,” “primary label,” or “Accessibility.”</p>
+          <div class="guide-hero-links" aria-label="Popular guide sections">
+            <a class="guide-button" href="#setup">Set up</a>
+            <a class="guide-button guide-button-secondary" href="#dictation">Start dictating</a>
+            <a class="guide-button guide-button-secondary" href="#troubleshooting">Fix a problem</a>
+          </div>
+        </header>
+
+        <section class="guide-section" id="start" aria-labelledby="start-title">
+          <p class="guide-kicker">Quick path</p>
+          <h2 id="start-title">Start here</h2>
+          <p>Use the table to find the shortest path to the job you want to do. Settings search can also find a control by name or intent.</p>
+          <div class="guide-table-wrap">
+            <table class="guide-table">
+              <thead>
+                <tr><th scope="col">What you want</th><th scope="col">Where to go</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Set up recording</td><td>Open the menu bar item → <strong>Settings</strong> → <strong>Models</strong> → <strong>Download</strong> beside <strong>Parakeet Unified</strong>; then <strong>Settings</strong> → <strong>Audio</strong> → <strong>Request Permissions</strong>.</td></tr>
+                <tr><td>Record a meeting or lecture</td><td>Open the menu bar item → choose <strong>Audio</strong> → <strong>Start Recording</strong> → <strong>Pause</strong> or <strong>Resume</strong> as needed → <strong>Finish</strong>.</td></tr>
+                <tr><td>Dictate into another app</td><td><strong>Settings</strong> → <strong>Dictation</strong> → <strong>Enable…</strong>; focus the destination field, hold <strong>Right Command</strong>, speak, then release.</td></tr>
+                <tr><td>Find or copy a transcript</td><td>Open <strong>Transcripts</strong> → search or filter → select a recording → <strong>Copy Raw</strong> or <strong>Copy Markdown</strong>.</td></tr>
+                <tr><td>Organize recordings</td><td><strong>Settings</strong> → <strong>Labels</strong> → <strong>Add Label</strong> → <strong>Create Label</strong>. Then open <strong>Labels</strong> in the recorder, select the label, and choose <strong>Make Primary</strong> if another label is already primary.</td></tr>
+                <tr><td>Change the recorder</td><td><strong>Settings</strong> → <strong>Tray Elements</strong> → turn optional elements on or off.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="guide-note">The app normally lives in the menu bar. Settings and Transcripts open in separate windows.</p>
+        </section>
+
+        <section class="guide-section" id="install" aria-labelledby="install-title">
+          <h2 id="install-title">Build and source</h2>
+          <p>Prosody requires macOS 15 or later and Apple silicon. This source snapshot does not include a signed installer, notarized build, or release assets.</p>
+          <h3 id="install-steps">Build from source</h3>
+          <p>See the repository README for the current build and source terms. Distribution identity and publication are handled outside this snapshot.</p>
+          <h3 id="upgrade">Upgrade notes</h3>
+          <p>Distributed builds may retain the bundle identifier and signing identity for upgrades. This source snapshot does not include a signed binary.</p>
+        </section>
+
+        <section class="guide-section" id="setup" aria-labelledby="setup-title">
+          <p class="guide-kicker">First run</p>
+          <h2 id="setup-title">First setup</h2>
+          <p>A normal launch puts Prosody in the menu bar without opening a main window. Click the menu bar item to open the recorder, then choose <strong>Settings</strong>.</p>
+          <ol class="guide-steps">
+            <li><strong>Download the speech model.</strong> Open <strong>Settings</strong> → <strong>Models</strong> and choose <strong>Download</strong> beside <strong>Parakeet Unified</strong>. The download needs an internet connection; recognition runs locally on your Mac.</li>
+            <li><strong>Choose an audio source.</strong> Open <strong>Settings</strong> → <strong>Audio</strong> and set <strong>Default source</strong> to <strong>System Audio</strong>, <strong>Microphone</strong>, or <strong>System + Mic</strong>.</li>
+            <li><strong>Request capture access.</strong> In the same Audio page, choose <strong>Request Permissions</strong> and allow the selected sources in macOS.</li>
+            <li><strong>Enable dictation.</strong> Open <strong>Settings</strong> → <strong>Dictation</strong>, choose <strong>Enable…</strong> for Accessibility, return to Prosody, and choose <strong>Check Again</strong>.</li>
+            <li><strong>Choose where files go.</strong> Use <strong>Settings</strong> → <strong>Output</strong> → <strong>Choose…</strong> to change the default folder. A <a href="#primary-label">primary label</a> can override it.</li>
+          </ol>
+
+          <h3 id="settings-search">Find a setting without browsing</h3>
+          <p>In <strong>Settings</strong>, press <kbd>⌘F</kbd>, type a control name or a word that describes the job, use the Up and Down Arrow keys to choose a result, and press Return. Press Escape to clear the search. Settings search opens the section and scrolls to the matching control.</p>
+
+          <h3 id="defaults">Defaults on a clean install</h3>
+          <div class="guide-table-wrap">
+            <table class="guide-table">
+              <thead>
+                <tr><th scope="col">Setting</th><th scope="col">Default</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Audio source</td><td><strong>System + Mic</strong></td></tr>
+                <tr><td>Microphone</td><td><strong>System Default</strong></td></tr>
+                <tr><td>Keep original audio</td><td>Off</td></tr>
+                <tr><td>Recording quality</td><td><strong>Efficient</strong></td></tr>
+                <tr><td>Live transcription</td><td>On</td></tr>
+                <tr><td>Speaker differentiation</td><td><strong>Basic</strong></td></tr>
+                <tr><td>Generate notes automatically</td><td>On</td></tr>
+                <tr><td>Notes provider</td><td><strong>Offline Outline</strong></td></tr>
+                <tr><td>Local-only mode</td><td>On</td></tr>
+                <tr><td>Output folder</td><td><code>~/Prosody</code></td></tr>
+                <tr><td>Output format</td><td><strong>Markdown (.md)</strong>, with canonical JSON</td></tr>
+                <tr><td>Global recording shortcut</td><td><kbd>⌥⌘R</kbd> (Option + Command + R)</td></tr>
+                <tr><td>Launch Prosody at Login</td><td>Off</td></tr>
+                <tr><td>Dictation shortcut</td><td><strong>Right Command</strong></td></tr>
+                <tr><td>Dictation activation</td><td><strong>Hold to talk</strong></td></tr>
+                <tr><td>Dictation pop-up</td><td><strong>Standard</strong></td></tr>
+                <tr><td>Text insertion</td><td><strong>Standard paste</strong></td></tr>
+                <tr><td>Copy output to clipboard</td><td>Off</td></tr>
+                <tr><td>Appearance</td><td><strong>Graphite</strong></td></tr>
+                <tr><td>Transcript layout</td><td>40 words per block; 1.5 s pause before a new block</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="guide-section" id="permissions" aria-labelledby="permissions-title">
+          <p class="guide-kicker">macOS access</p>
+          <h2 id="permissions-title">Permissions and troubleshooting</h2>
+          <p>Enable only the grants needed for the features you use. macOS stores these grants by app identity, so use the installed copy in <strong>Applications</strong> and keep one copy of the app.</p>
+          <div class="guide-table-wrap">
+            <table class="guide-table">
+              <thead>
+                <tr><th scope="col">Feature</th><th scope="col">System Settings → Privacy &amp; Security</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Record the microphone or dictate</td><td><strong>Microphone</strong></td></tr>
+                <tr><td>Record system audio</td><td><strong>Screen &amp; System Audio Recording</strong></td></tr>
+                <tr><td>Use the dictation shortcut and insert text into another app</td><td><strong>Accessibility</strong></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>For Accessibility, open <strong>Settings</strong> → <strong>Dictation</strong> → <strong>Enable…</strong>. Turn on the Prosody app in System Settings, return to Prosody, and choose <strong>Check Again</strong>.</p>
+
+          <h3 id="permission-troubleshooting">If a permission is on but capture still fails</h3>
+          <ol class="guide-steps">
+            <li>Quit and reopen the installed copy in <strong>Applications</strong>.</li>
+            <li>Open <strong>System Settings</strong> → <strong>Privacy &amp; Security</strong> and remove any stale entry for an older copy or signing identity.</li>
+            <li>Enable the current app in the required pane. If macOS asks you to quit and reopen, do so.</li>
+            <li>Retry capture, or return to <strong>Settings</strong> → <strong>Dictation</strong> → <strong>Check Again</strong>.</li>
+          </ol>
+          <p>For a first-open warning from macOS, see <a href="#install-steps">Install the app</a>. Capture and Accessibility grants apply after the app opens.</p>
+        </section>
+
+        <section class="guide-section" id="tray-elements" aria-labelledby="tray-elements-title">
+          <p class="guide-kicker">Menu bar recorder</p>
+          <h2 id="tray-elements-title">Menu bar and Tray Elements</h2>
+          <p>The menu bar item is the main recorder. Click it to open the popover. Right-click or Control-click it for a quick menu. The app menu also exposes the main windows and shortcuts.</p>
+
+          <div class="guide-grid">
+            <div class="guide-card">
+              <h3>Left-click</h3>
+              <p>Open the recorder popover. Choose a source, title, labels, note template, or save location; then start, pause, resume, or finish a recording.</p>
+            </div>
+            <div class="guide-card">
+              <h3>Right-click or Control-click</h3>
+              <p>Open the quick menu for <strong>Show Prosody</strong>, <strong>Browse Transcripts…</strong>, <strong>Transcribe Audio File…</strong>, recording controls, <strong>Settings…</strong>, and <strong>Quit Prosody</strong>.</p>
+            </div>
+          </div>
+
+          <p>The popover keeps <strong>Transcripts</strong>, <strong>Settings</strong>, and a <strong>More actions</strong> menu pinned at the bottom. The menu bar icon gains a small recording indicator while capture is active.</p>
+
+          <h3 id="tray-settings">Choose optional elements</h3>
+          <p>Open <strong>Settings</strong> → <strong>Tray Elements</strong>. These optional recorder elements are visible by default:</p>
+          <ul class="guide-check-list">
+            <li>Logo and app name</li>
+            <li><strong>Recording title</strong></li>
+            <li><strong>Recording labels</strong></li>
+            <li><strong>Audio source</strong></li>
+            <li><strong>Note template</strong></li>
+            <li><strong>Save location</strong></li>
+            <li><strong>Recent recordings</strong> (up to three)</li>
+          </ul>
+          <p>Turning an element off hides it from the recorder without changing the saved choice behind it. Recording actions, status, and recovery notices stay visible. Choose <strong>Show All Controls</strong> to restore the optional elements.</p>
+
+          <h3 id="launch-at-login">Launch Prosody at Login</h3>
+          <p>Open <strong>Settings</strong> → <strong>General</strong> and enable <strong>Launch Prosody at Login</strong>. If Prosody reports that approval is needed, choose <strong>Open Login Items…</strong>, approve it in System Settings, and return to Prosody to check the status.</p>
+
+          <h3 id="shortcuts">Keyboard shortcuts</h3>
+          <p>Window and app menu shortcuts apply while Prosody is active. Recording and dictation have separate global shortcuts.</p>
+          <div class="guide-table-wrap">
+            <table class="guide-table">
+              <thead>
+                <tr><th scope="col">Action</th><th scope="col">Shortcut</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Start or pause a recording from any app</td><td><kbd>⌥⌘R</kbd> by default; change it in <strong>Settings</strong> → <strong>General</strong> → <strong>Global recording shortcut</strong></td></tr>
+                <tr><td>Open Settings</td><td><kbd>⌘,</kbd></td></tr>
+                <tr><td>Browse Transcripts</td><td><kbd>⌘L</kbd></td></tr>
+                <tr><td>Transcribe an audio file</td><td><kbd>⌘O</kbd></td></tr>
+                <tr><td>Show the recorder</td><td><kbd>⌘0</kbd></td></tr>
+                <tr><td>Enter or leave full screen</td><td><kbd>⌃⌘F</kbd> or <strong>View</strong> → <strong>Enter Full Screen</strong></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="guide-section" id="record" aria-labelledby="record-title">
+          <p class="guide-kicker">Capture</p>
+          <h2 id="record-title">Record audio</h2>
+          <ol class="guide-steps">
+            <li>Open the menu bar item.</li>
+            <li>Choose <strong>Audio</strong> → <strong>System Audio</strong>, <strong>Microphone</strong>, or <strong>System + Mic</strong>.</li>
+            <li>Optionally enter a <strong>Recording title</strong> and choose <strong>Labels</strong>. If automatic notes are on, choose a <strong>Template</strong>. Check <strong>Save to</strong>; choosing a folder there updates the primary label’s folder, or the default folder if there’s no primary label.</li>
+            <li>Choose <strong>Start Recording</strong>. The status changes to <strong>Recording</strong> and the timer begins.</li>
+            <li>Choose <strong>Pause</strong> to skip a portion, then <strong>Resume</strong> when ready. Choose <strong>Finish</strong> to stop and save.</li>
+          </ol>
+          <p>After a successful save, a notice appears with <strong>View</strong> for the new transcript. It clears automatically after about five seconds; starting another recording also clears it.</p>
+
+          <h3 id="recording-options">Recording options</h3>
+          <div class="guide-grid">
+            <div class="guide-card">
+              <h3>Live transcription</h3>
+              <p>On by default. Text appears while you record. Turn it off in <strong>Settings</strong> → <strong>Transcription</strong> to transcribe after you finish and reduce processing during capture. The choice applies to the next recording.</p>
+            </div>
+            <div class="guide-card">
+              <h3>Keep original audio</h3>
+              <p>Off by default. Turn it on in <strong>Settings</strong> → <strong>Audio</strong> to retain source audio for playback in Transcripts. Recovery audio is still written temporarily while a recording is in progress.</p>
+            </div>
+            <div class="guide-card">
+              <h3>Recording quality</h3>
+              <p><strong>Efficient</strong> uses less disk space; <strong>High</strong> preserves more detail. Choose the quality in <strong>Settings</strong> → <strong>Audio</strong>.</p>
+            </div>
+            <div class="guide-card">
+              <h3>Transcript layout</h3>
+              <p>In <strong>Settings</strong> → <strong>Transcription</strong> → <strong>Transcript layout</strong>, <strong>Maximum words per block</strong> defaults to 40 (10–100) and <strong>Pause before new block</strong> defaults to 1.5 seconds (0.5–5). Changes apply to the next transcription.</p>
+            </div>
+          </div>
+
+          <h3 id="speakers-during-record">Speakers and notes after recording</h3>
+          <p><strong>Settings</strong> → <strong>Speakers</strong> controls speaker differentiation. <strong>Basic</strong> separates your microphone from system audio; <strong>Full</strong> attempts to separate individual speakers after the transcript is saved and may download a separate model. If that pass is unavailable, source labels are kept.</p>
+          <p>If <strong>Generate notes automatically</strong> is on, notes are created after the transcript and any speaker pass. Dictation never creates notes.</p>
+          <p>Most settings are locked while a recording or processing pass is active. Appearance, Tray Elements, and transcript layout remain editable.</p>
+        </section>
+
+        <section class="guide-section" id="dictation" aria-labelledby="dictation-title">
+          <p class="guide-kicker">Speak into another app</p>
+          <h2 id="dictation-title">Dictation</h2>
+          <p>Dictation turns speech into text in the focused text field. It uses the selected microphone and your Word Replacements. It does not generate notes.</p>
+
+          <h3 id="dictation-setup">Set up dictation</h3>
+          <ol class="guide-steps">
+            <li>Open <strong>Settings</strong> → <strong>Dictation</strong>.</li>
+            <li>Choose <strong>Enable…</strong> for Accessibility, turn on the app in System Settings, then return and choose <strong>Check Again</strong>.</li>
+            <li>Confirm that <strong>Microphone</strong> access is enabled in <strong>System Settings</strong> → <strong>Privacy &amp; Security</strong>.</li>
+            <li>Keep the destination field focused. Hold <strong>Right Command</strong>, speak, and release the key.</li>
+          </ol>
+
+          <h3 id="dictation-options">Activation and appearance</h3>
+          <div class="guide-table-wrap">
+            <table class="guide-table">
+              <thead>
+                <tr><th scope="col">Control</th><th scope="col">Choices and defaults</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><strong>Shortcut</strong></td><td><strong>Right Command</strong> (default), <strong>Right Option</strong>, or <strong>Control + Option + Space</strong></td></tr>
+                <tr><td><strong>Activation</strong></td><td><strong>Hold to talk</strong> (default) or <strong>Press to start / stop</strong></td></tr>
+                <tr><td><strong>Pop-up appearance</strong></td><td><strong>Standard</strong> (default) or <strong>Minimal</strong>, which shows only the waveform</td></tr>
+                <tr><td><strong>Text insertion</strong></td><td><strong>Standard paste</strong> (default) or <strong>Keyboard typing</strong></td></tr>
+                <tr><td><strong>Copy output to clipboard</strong></td><td>Off by default</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>In <strong>Press to start / stop</strong> mode, press once to start and again to finish. The recording hotkey in <strong>General</strong> is separate.</p>
+
+          <h3 id="dictation-repeat">Dictate again immediately</h3>
+          <p>Release the shortcut after one phrase, then press it again to start the next. In toggle mode, stop one dictation and use the next press to start another. Capture can start while the previous result is still being prepared or sent. A small queue keeps results in release order; if it fills, let a result finish before trying again.</p>
+
+          <h3 id="dictation-delivery">Delivery and fallback</h3>
+          <ul class="guide-list">
+            <li><strong>Standard paste</strong> sends Command-V after the shortcut modifiers are released. Prosody checks that the original destination is still safe. Keep the intended field focused; switching apps, fields, or moving the caret can prevent insertion. The app can account for a caret move caused by its own earlier insertion when the editor provides enough information.</li>
+            <li>With <strong>Copy output to clipboard</strong> off, Standard paste restores the prior clipboard if it is still unchanged. Turn the setting on to keep the dictated text on the clipboard.</li>
+            <li><strong>Keyboard typing</strong> is a compatibility mode for editors that block paste. It types the text in chunks and checks that the destination is still current.</li>
+            <li>Delivered and copied dictation text gets one trailing space. The transcript saved in Transcripts stays clean.</li>
+            <li>If Prosody cannot safely insert the text, use <strong>Copy Text</strong> when the result panel appears, then paste into the field yourself.</li>
+            <li>Prosody does not retry a paste after it has already been dispatched. Secure input, remote desktops, and custom editors can still reject the event.</li>
+            <li>Press <strong>Escape</strong> to discard unfinished dictation. Text already being delivered is not undone.</li>
+            <li>A very short tap or a dictation with no recognized text creates no output and returns to idle.</li>
+          </ul>
+          <p>Completed dictations are saved in <strong>Transcripts</strong>. Turn on <strong>Include Dictation</strong> in the sidebar to see them.</p>
+        </section>
+
+        <section class="guide-section" id="transcripts" aria-labelledby="transcripts-title">
+          <p class="guide-kicker">Find, copy, import, recover</p>
+          <h2 id="transcripts-title">Transcripts, exports, imports, and recovery</h2>
+          <p>Open <strong>Transcripts</strong> from the recorder footer or choose <strong>Browse Transcripts…</strong> in the menu bar quick menu. Start, pause, resume, and finish recordings in the menu bar recorder.</p>
+
+          <h3 id="transcript-search">Search and sort</h3>
+          <ul class="guide-list">
+            <li>The left sidebar searches recording names and labels.</li>
+            <li>Use the <strong>Label</strong> filter to show one label or <strong>All labels</strong>. The default sort is <strong>Newest first</strong>; you can also sort by oldest, recording name, longest, shortest, or label.</li>
+            <li><strong>Include Dictation</strong> is off by default. Turn it on to browse saved dictation history alongside recordings and imports.</li>
+            <li><strong>With retained audio</strong> and <strong>Without retained audio</strong> are both checked by default. Uncheck one to show only the other; the app prevents you from clearing both.</li>
+            <li>The transcript detail search finds text and speaker names inside the selected transcript. Search filters the visible rows and suspends follow; clear the query to restore the previous follow choice.</li>
+          </ul>
+
+          <h3 id="transcript-actions">Copy and open</h3>
+          <div class="guide-grid">
+            <div class="guide-card">
+              <h3>Copy Raw</h3>
+              <p>Copies plain speech with one blank line between blocks. It leaves out timestamps and speaker names.</p>
+            </div>
+            <div class="guide-card">
+              <h3>Copy Markdown</h3>
+              <p>Copies the formatted transcript, including its Markdown structure and labels.</p>
+            </div>
+            <div class="guide-card">
+              <h3>More transcript actions</h3>
+              <p>Use the ellipsis menu for <strong>Rename Speakers</strong>, <strong>Regenerate Notes</strong>, <strong>Open Notes</strong>, and <strong>Reveal in Finder</strong>.</p>
+            </div>
+          </div>
+
+          <h3 id="playback">Play audio and follow the transcript</h3>
+          <p>Open a transcript with retained audio. Click <strong>Play</strong>, click a timestamp to jump to that passage, or drag along the timeline to scrub. The arrows next to the timeline jump five seconds at a time.</p>
+          <p>When the button reads <strong>Following</strong>, the reader highlights the current passage and scrolls with the audio. Scrolling by hand or searching suspends follow so the reader stays where you’re reading. While a search is active, <strong>Follow Audio</strong> is disabled; clear the search first. An explicit scrub still moves the highlighted row when no search is active, even if automatic follow is off. You can read, search, and copy transcripts without audio.</p>
+          <p>The timeline shows where speech occurs, skips duplicate echo text, and leaves trailing silence blank after the last visible speech time. Long sessions load audio as needed for playback, and the skip controls move five seconds. Closing the transcript window stops playback. A session without retained audio, or with missing audio files, stays readable and searchable and shows an explicit unavailable-audio state.</p>
+
+          <h3 id="import-audio">Transcribe an audio file</h3>
+          <p>Choose <strong>Transcripts</strong> → <strong>Transcribe Audio File…</strong>, select one file, and click <strong>Transcribe</strong>. Common formats include MP3, WAV, M4A, CAF, AIFF, and FLAC. Enable <strong>Settings</strong> → <strong>Audio</strong> → <strong>Keep original audio</strong> before importing if you want a playable copy saved with the transcript.</p>
+
+          <h3 id="recovery">Recover an unfinished recording</h3>
+          <p>Prosody writes a recovery journal and temporary audio while recording. If the app or Mac stops unexpectedly, the next launch can show an <strong>Unfinished recording</strong> notice in the recorder.</p>
+          <ol class="guide-steps">
+            <li>Open the menu bar item and find the unfinished recording notice.</li>
+            <li>Choose <strong>Recover</strong> to finish the transcript, optional speaker pass, notes, and retained audio.</li>
+            <li>To discard it, choose <strong>Delete…</strong>, then confirm with <strong>Delete Recording</strong>.</li>
+          </ol>
+
+          <h3 id="delete-recording">Delete a finished recording</h3>
+          <p>Right-click a recording in Transcripts or a recent recording in the recorder, choose <strong>Delete Recording…</strong>, and confirm. This removes the transcript, notes, and saved audio for that recording. It cannot be undone.</p>
+        </section>
+
+        <section class="guide-section" id="labels" aria-labelledby="labels-title">
+          <p class="guide-kicker">Organize by course, project, or series</p>
+          <h2 id="labels-title">Labels, names, colors, folders, and the primary label</h2>
+          <p>Labels organize recordings and can control the recording name, Markdown filename, and save folder. A recording can have several labels; the first selected label is the <strong>Primary</strong> label.</p>
+
+          <h3 id="create-label">Create or edit a label</h3>
+          <ol class="guide-steps">
+            <li>Open <strong>Settings</strong> → <strong>Labels</strong>.</li>
+            <li>Choose <strong>Add Label</strong> or select an existing label in <strong>Library</strong>.</li>
+            <li>Enter a <strong>Label name</strong> of up to 80 characters. Names must be unique without regard to case.</li>
+            <li>Choose a <strong>Color</strong> with the color picker or enter a six-digit hex value such as <code>#5676D9</code>.</li>
+            <li>Under <strong>Naming</strong>, set the <strong>File naming pattern</strong> and <strong>Date format</strong>. Check <strong>Preview</strong> for the resulting title and Markdown filename.</li>
+            <li>Under <strong>Saving destination</strong>, check the folder path. Choose <strong>Choose Folder…</strong> for a custom destination or <strong>Use Default Folder</strong> to clear it.</li>
+            <li>Choose <strong>Create Label</strong> for a new label or <strong>Save Changes</strong> for an existing one.</li>
+          </ol>
+          <p>Unsaved drafts stay in <strong>Labels</strong> as you switch labels or Settings pages. Use <strong>Discard Changes</strong> to restore a saved label or <strong>Cancel</strong> to drop a new draft. A new label starts with the default output folder, the pattern <code>{title}</code>, and the date format <code>yyyy-MM-dd</code>.</p>
+
+          <h3 id="label-tokens">Filename tokens</h3>
+          <p>Use <strong>Insert</strong> to add a token, or type a pattern such as <code>{date} - {title}</code>. Each recording gets its own session folder; the pattern sets the recording title and Markdown filename.</p>
+          <div class="guide-token-list" aria-label="Filename tokens">
+            <code>{title}</code><code>{label}</code><code>{date}</code><code>{time}</code><code>{year}</code><code>{month}</code><code>{day}</code><code>{weekday}</code><code>{id}</code>
+          </div>
+          <p>Dates use local time. <code>yyyy</code> is the year, <code>MM</code> the month, <code>dd</code> the day, and <code>MMM</code> the short month. <code>{time}</code> uses <code>HH-mm-ss</code>. Unknown tokens and an empty date format for <code>{date}</code> block saving.</p>
+
+          <h3 id="primary-label">Choose labels and make one primary</h3>
+          <ol class="guide-steps">
+            <li>Open the menu bar recorder and choose <strong>Labels</strong>.</li>
+            <li>Turn on each label you want on the next recording.</li>
+            <li>Choose <strong>Make Primary</strong> beside a selected label. The primary label controls the recording name pattern and save folder.</li>
+            <li>Choose <strong>Done</strong>. The recorder shows the primary label and a count of additional labels.</li>
+          </ol>
+          <p>For a saved recording, open it in Transcripts and choose <strong>Labels</strong>. Select the labels, then choose <strong>Save Labels</strong>. This updates the labels in the transcript and Markdown; existing files keep their names and locations.</p>
+          <p>Deleting a label removes it from future choices but keeps saved recordings and their label snapshots. The delete confirmation explains this before you commit.</p>
+        </section>
+
+        <section class="guide-section" id="appearance" aria-labelledby="appearance-title">
+          <p class="guide-kicker">Look and feel</p>
+          <h2 id="appearance-title">Appearance</h2>
+          <p>Open <strong>Settings</strong> → <strong>Appearance</strong>. Themes apply to the recorder, Settings, Transcripts, sheets, popovers, and dictation overlay. The menu bar and Dock icons stay monochrome. <strong>Graphite</strong> is the default.</p>
+          <p>Beta 1 adds 55 themes for a total of 91, across seven groups. In <strong>Appearance</strong>, click a swatch to apply it.</p>
+          <div class="guide-grid guide-grid-three">
+            <div class="guide-card"><h3>System &amp; Glass</h3><p>Frosted Glass, Smoked Glass, and Sea Glass. Frosted Glass follows the system light or dark appearance.</p></div>
+            <div class="guide-card"><h3>Essentials</h3><p>Graphite, Pearl, Linen, Daybreak, Cloud, Chalk, Canvas, Slate, Stone, and Fog.</p></div>
+            <div class="guide-card"><h3>Ink &amp; OLED</h3><p>Midnight, Obsidian, Blue Hour, Ultramarine, Eclipse, True Black OLED, Cobalt Ink, Navy Ink, Carbon Cyan, Ink Violet, Deep Navy, Royal Ink, Midnight Cyan, and Ink Plum.</p></div>
+            <div class="guide-card"><h3>Coast &amp; Forest</h3><p>Fjord, Tidal, Pine, Matcha, Sea Salt, Celadon, Deep Sea, Lichen, Verdigris, Coastal Fog, Kelp, Moss, Fern, Rainforest, Glacier, Harbor, Lagoon, Driftwood, and Evergreen.</p></div>
+            <div class="guide-card"><h3>Studio &amp; Print</h3><p>Rosewater, Amethyst, Solar, Lavender Mist, Apricot, Hibiscus, Cornflower, Citron, Opal, Risograph Red, Blueprint, Newsprint, Letterpress, Gouache, Watercolor, Vermilion, Cerulean, and Magenta Press.</p></div>
+            <div class="guide-card"><h3>Night &amp; Signal</h3><p>Aurora, Plum, Mulberry, Neon Nocturne, Signal Red, Signal Amber, Radar Green, Ultraviolet, Arcade, Laser Pink, Nightwatch, Beacon, and Starlight.</p></div>
+            <div class="guide-card"><h3>Mineral &amp; Earth</h3><p>Dune, Terracotta, Copper, Redwood, Espresso, Basalt, Granite, Quartz, Clay, Ochre, Umber, Jade, Sandstone, and Moss Agate.</p></div>
+          </div>
+          <p>If <strong>Reduce Transparency</strong> is enabled in macOS Accessibility settings, Frosted Glass uses an opaque fallback. <strong>Reduce Motion</strong> disables waveform interpolation while the meter still responds to audio.</p>
+          <p>Search Settings for <strong>theme</strong>, <strong>dark</strong>, <strong>light</strong>, <strong>glass</strong>, or <strong>palette</strong> to jump to Appearance.</p>
+        </section>
+
+        <section class="guide-section" id="notes-privacy" aria-labelledby="notes-privacy-title">
+          <p class="guide-kicker">Local first</p>
+          <h2 id="notes-privacy-title">Notes, speakers, and privacy</h2>
+
+          <h3 id="notes">Notes</h3>
+          <p>Open <strong>Settings</strong> → <strong>Notes</strong>. <strong>Generate notes automatically</strong> is on by default. Notes are created after the transcript and any speaker pass. Dictation never creates notes.</p>
+          <div class="guide-table-wrap">
+            <table class="guide-table">
+              <thead>
+                <tr><th scope="col">Provider</th><th scope="col">What it does</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><strong>Offline Outline</strong> (default)</td><td>Organizes the transcript locally without an AI model.</td></tr>
+                <tr><td><strong>Local OpenAI-Compatible</strong></td><td>Connects to a local server such as LM Studio or Ollama. The default base URL is <code>http://127.0.0.1:1234/v1</code> and the default model is <code>qwen3-4b</code>.</td></tr>
+                <tr><td><strong>OpenAI</strong> (remote)</td><td>Available only when <strong>Local-only mode</strong> is off. Generating notes sends the transcript text to the remote provider.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>For a server provider, enter the model ID and base URL, choose <strong>Save API Key</strong> if needed, and choose <strong>Test Connection</strong>. The API key is stored in the macOS Keychain and kept out of session files. If a provider is unavailable, Prosody saves an offline outline and warns that it is not an AI summary.</p>
+          <p>When automatic notes are on, use <strong>Template</strong> in the recorder. Choose from <strong>Lecture Notes</strong> (default), <strong>Meeting Minutes</strong>, <strong>Study Notes</strong>, <strong>Cornell Notes</strong>, <strong>Summary</strong>, <strong>Action Items</strong>, and <strong>Transcript Only</strong>.</p>
+          <p>To regenerate notes, open the transcript, choose the ellipsis menu, and choose <strong>Regenerate Notes</strong>. Use <strong>Open Notes</strong> to open the saved <code>notes.md</code>.</p>
+
+          <h3 id="word-replacements">Word Replacements</h3>
+          <p>Open <strong>Settings</strong> → <strong>Replacements</strong> and choose <strong>Add Replacement</strong>. Enter the <strong>Recognized as</strong> text and the <strong>Replace with</strong> text. There are no rules on a clean install.</p>
+          <ul class="guide-list">
+            <li>Rules match whole words or phrases without regard to case.</li>
+            <li>The longest matching phrase wins; duplicate originals use the first rule.</li>
+            <li>An empty replacement removes the matched word or phrase.</li>
+            <li>Rules apply to new recordings, imports, and dictations. Saved transcripts stay unchanged.</li>
+            <li>Replacements are literal text, so punctuation and regex-like characters are treated as text.</li>
+          </ul>
+
+          <h3 id="speakers">Speakers</h3>
+          <p>Open <strong>Settings</strong> → <strong>Speakers</strong> → <strong>Speaker differentiation</strong>.</p>
+          <div class="guide-table-wrap">
+            <table class="guide-table">
+              <thead>
+                <tr><th scope="col">Mode</th><th scope="col">Result</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><strong>Off</strong></td><td>Skips speaker differentiation.</td></tr>
+                <tr><td><strong>Basic</strong> (default)</td><td>Separates your microphone from system audio.</td></tr>
+                <tr><td><strong>Full</strong></td><td>Attempts to separate individual speakers after the transcript is saved. May download a separate model.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>Rename speakers from the transcript ellipsis menu or by clicking a speaker name. Names update the transcript and are used for future note generation.</p>
+
+          <h3 id="hotkeys">Hotkeys</h3>
+          <p><strong>Global recording shortcut</strong> is in <strong>Settings</strong> → <strong>General</strong>. The default is <kbd>⌥⌘R</kbd>. Other presets are <kbd>⌃⌥R</kbd>, <kbd>⌃⇧R</kbd>, <kbd>⇧⌘R</kbd>, and <kbd>⌃⌥C</kbd>. Dictation uses its own shortcut in <strong>Settings</strong> → <strong>Dictation</strong>.</p>
+
+          <h3 id="privacy">Privacy</h3>
+          <ul class="guide-list">
+            <li>Audio capture and speech recognition run on your Mac with the downloaded speech model.</li>
+            <li><strong>Offline Outline</strong> notes are local. <strong>Local OpenAI-Compatible</strong> notes go to the local server you configure.</li>
+            <li>When you generate notes with a remote provider, it receives transcript text and context such as the title, speaker names, and timestamps. Speech recognition still runs on your Mac.</li>
+            <li><strong>Local-only mode</strong> is on by default and blocks non-local notes providers. It does not block downloading speech models.</li>
+            <li>Remote notes endpoints must use HTTPS; plain HTTP is limited to loopback addresses. Redirects are not followed.</li>
+            <li>API keys are stored in the macOS Keychain. Session files contain transcript and settings metadata, not the key.</li>
+            <li>Transcripts, recovery files, and model caches are stored locally. Back up the folders you use.</li>
+          </ul>
+        </section>
+
+        <section class="guide-section" id="architecture" aria-labelledby="architecture-title">
+          <p class="guide-kicker">How the pieces fit</p>
+          <h2 id="architecture-title">Architecture</h2>
+          <p>Prosody is a Swift Package Manager app with an AppKit shell and a SwiftUI interface. <code>ProsodyApp</code> hosts the interface, <code>ProsodyCore</code> holds recording and transcription logic, and <code>ProsodyValidation</code> provides checks and benchmark tools.</p>
+          <div class="guide-architecture">
+            <div><strong>Application shell</strong><span>Menu bar item, recorder popover, Settings and Transcripts windows, dictation panel.</span></div>
+            <div><strong>AppModel</strong><span>Main-actor source of truth for recording, processing, selection, and user-visible state.</span></div>
+            <div><strong>Capture and transcription</strong><span>ScreenCaptureKit for system audio, AVFoundation for the microphone, and the local Parakeet engine.</span></div>
+            <div><strong>Transcript pipeline</strong><span>Streaming assembly, chunking, echo removal, word replacements, and deferred file transcription.</span></div>
+            <div><strong>Recovery and storage</strong><span>Checkpointed recovery journal, temporary audio archive, completed session store, and session index.</span></div>
+            <div><strong>Dictation</strong><span>The next capture can start while earlier results finish in release order. Finalization is serial, and delivery checks the original destination before pasting or typing.</span></div>
+            <div><strong>Notes</strong><span>Local Offline Outline by default; optional local or remote OpenAI-compatible providers.</span></div>
+          </div>
+          <p>The Settings search index is built from the control declarations, so a matching result opens the right section and scrolls to the control. The app uses direct distribution so Accessibility-based dictation can observe the shortcut and deliver text to the focused app.</p>
+          <p>Session metadata stores an optional source kind so older manifests and indexes still decode. New sessions write <code>recording</code>, <code>dictation</code>, or <code>file</code>. Legacy dictation is inferred only from a strict set of historical fields; other old sessions are marked <code>legacy</code> and stay visible. Retained-audio presence is also optional until the library inspects the session’s files.</p>
+        </section>
+
+        <section class="guide-section" id="local-data" aria-labelledby="local-data-title">
+          <p class="guide-kicker">Files and backups</p>
+          <h2 id="local-data-title">Local data and backup</h2>
+          <p>Completed sessions go in the folder shown in <strong>Settings</strong> → <strong>Output</strong>, unless a primary label supplies another folder. A clean install defaults to <code>~/Prosody</code>. Upgrades keep existing destinations, including <code>~/Clippy</code> when it was the previous output folder.</p>
+          <div class="guide-grid">
+            <div class="guide-card">
+              <h3>Session folder</h3>
+              <p>Contains the Markdown transcript, <code>transcript.json</code>, <code>session.json</code>, optional <code>notes.md</code>, and optional retained audio.</p>
+            </div>
+            <div class="guide-card">
+              <h3>Application support</h3>
+              <p>Prosody prefers the previous sandbox support folder at <code>~/Library/Containers/com.openai.clippy/Data/Library/Application Support/Clippy</code>. Otherwise it uses <code>~/Library/Application Support/Clippy</code>. Models and recovery data live under that folder. Preferences use the same macOS app identity, <code>com.openai.clippy</code>.</p>
+            </div>
+            <div class="guide-card">
+              <h3>Keychain</h3>
+              <p>Stores optional notes-provider API keys. They are not written into transcripts or session manifests.</p>
+            </div>
+            <div class="guide-card">
+              <h3>Model cache</h3>
+              <p>Contains downloaded speech and optional diarization model files. These can be downloaded again after a move.</p>
+            </div>
+          </div>
+          <h3 id="backup">What to back up</h3>
+          <ul class="guide-list">
+            <li>Finish any recordings, let processing complete, and quit Prosody before copying data.</li>
+            <li>Back up every output folder you use, including folders assigned to labels. Keep each session folder and its contents together. To find one, select the transcript and choose <strong>More Transcript Actions</strong> → <strong>Reveal in Finder</strong>.</li>
+            <li>Include the app’s support folder if you need unfinished recovery data or fallback sessions. macOS stores app preferences and Keychain entries separately.</li>
+            <li>The model cache is large but replaceable; include it only if you want to avoid downloading models again.</li>
+          </ul>
+          <p>After moving or restoring an output folder, select it again under <strong>Output</strong> or in the label editor. Changing the output setting alone doesn’t move existing files.</p>
+
+          <h3 id="legacy-metadata">Legacy sessions and upgrade identity</h3>
+          <p>The old sandbox output folder can be <code>~/Library/Containers/com.openai.clippy/Data/Clippy</code>. The one-time direct-distribution migration imports missing <code>preferences.*</code> values from the old sandbox plist and can select that sandbox output folder when no direct output preference exists. It does not move or delete saved recordings.</p>
+          <p>Distributed builds may retain the bundle identifier and signing identity for upgrades. A changed signing identity changes the designated code requirement and can require permission grants again. Uncertain legacy sessions remain visible rather than being silently hidden as dictation.</p>
+        </section>
+
+        <section class="guide-section" id="models" aria-labelledby="models-title">
+          <p class="guide-kicker">Speech model</p>
+          <h2 id="models-title">Model availability</h2>
+          <p>The current <strong>Models</strong> page offers <strong>Parakeet Unified</strong> for English. It supports streaming and word timestamps and is about 565 MB. Download it once with an internet connection; recognition then runs locally.</p>
+          <ul class="guide-list">
+            <li>A distributed build contains no model weights. The app downloads the model after installation.</li>
+            <li>Once installed, Parakeet Unified is marked <strong>Selected</strong>. The Models page does not offer a remove button for the selected model.</li>
+            <li>If a download is interrupted, choose <strong>Download</strong> again. Check free disk space and the network connection if it fails repeatedly.</li>
+            <li>Deferred transcription, imports, and dictation use the same local speech model.</li>
+            <li>Full speaker separation may need a separate model download. If it is unavailable, Prosody keeps source labels.</li>
+          </ul>
+        </section>
+
+        <section class="guide-section" id="troubleshooting" aria-labelledby="troubleshooting-title">
+          <p class="guide-kicker">When something does not work</p>
+          <h2 id="troubleshooting-title">Troubleshooting</h2>
+          <div class="guide-faq">
+            <h3>I cannot find the app.</h3>
+            <p>Look for the Prosody icon in the macOS menu bar. Click it or reopen Prosody from <strong>Applications</strong> to show the recorder.</p>
+
+            <h3>Start Recording is disabled.</h3>
+            <p>Wait for the current recording, dictation, or processing pass to finish. Check that the speech model is installed and that the selected audio source has its macOS permission.</p>
+
+            <h3>System audio is missing.</h3>
+            <p>Choose <strong>System Audio</strong> or <strong>System + Mic</strong>, enable <strong>Screen &amp; System Audio Recording</strong>, and reopen the installed app. Confirm that the source is playing and not muted.</p>
+
+            <h3>The microphone is silent.</h3>
+            <p>Choose the correct microphone in <strong>Settings</strong> → <strong>Audio</strong>, enable <strong>Microphone</strong>, and check the input level in macOS Sound settings.</p>
+
+            <h3>No transcript appears after Finish.</h3>
+            <p>Wait for <strong>Finalizing transcript…</strong> to finish. If <strong>Live transcription</strong> is off, the saved audio is transcribed after capture. A no-speech warning means the selected source did not produce recognizable speech.</p>
+
+            <h3>Dictation does not insert text.</h3>
+            <p>Check <strong>Accessibility</strong> and <strong>Microphone</strong>, keep the destination field focused, and choose <strong>Check Again</strong>. If the editor blocks paste, switch <strong>Text insertion</strong> to <strong>Keyboard typing</strong>. If a result panel appears, choose <strong>Copy Text</strong> and paste manually. Secure input and remote desktop apps can block insertion.</p>
+
+            <h3>My dictations are missing from Transcripts.</h3>
+            <p>Turn on <strong>Include Dictation</strong> in the sidebar. If you still don’t see the result, clear the title search and label filter and check both audio boxes. A canceled, very short, or silent dictation does not create a saved transcript.</p>
+
+            <h3>The transcript scrolls away from where I’m reading.</h3>
+            <p>Click <strong>Following</strong> to turn follow off, or scroll by hand to suspend it. Click <strong>Follow Audio</strong> when you want to return to playback. If a search is active, clear it first because <strong>Follow Audio</strong> is disabled while the transcript is filtered.</p>
+
+            <h3>Settings are locked.</h3>
+            <p>Most controls are unavailable while recording or processing. Appearance, Tray Elements, and transcript layout remain editable. Finish the current job and try again.</p>
+
+            <h3>The output folder cannot be found.</h3>
+            <p>Choose the folder again in <strong>Settings</strong> → <strong>Output</strong> or in the label editor. A primary label’s folder overrides the default output folder.</p>
+
+            <h3>Notes did not use my provider.</h3>
+            <p>Check the provider, model ID, base URL, and <strong>Test Connection</strong>. Turn off <strong>Local-only mode</strong> only if you intend to send transcript text to a remote provider. When a provider fails, Prosody saves an offline outline and labels it as such.</p>
+
+            <h3>An unfinished recording appears.</h3>
+            <p>Choose <strong>Recover</strong> to finish it or <strong>Delete…</strong> to discard it. Recovery is designed to preserve checkpoints after an unexpected stop.</p>
+
+            <h3>The app will not launch.</h3>
+            <p>If a distributed build is available, verify its source and checksum. This source snapshot does not include a signed installer.</p>
+          </div>
+        </section>
+
+        <section class="guide-section" id="help" aria-labelledby="help-title">
+          <p class="guide-kicker">Support</p>
+          <h2 id="help-title">Help</h2>
+          <p>Use the project issue tracker once a neutral destination is configured. Include the version and build from <strong>About Prosody</strong>, your macOS version, the steps to reproduce the problem, and the error text. Use a sample transcript and remove credentials and personal content before posting.</p>
+          <p>For a suspected vulnerability, use the project private reporting channel once it is configured.</p>
+          <h3 id="source-terms">Source and terms</h3>
+          <p>Prosody’s source and assets are <strong>all rights reserved</strong>. The intended public source destination will be configured separately. This snapshot remains subject to a history disclosure review and does not grant an open-source license.</p>
+          <p class="guide-back"><a href="#main-content">Back to the top</a></p>
+        </section>
+      </article>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-row">
+      <p><strong>Prosody</strong> · The shape of speech.</p>
+      <nav aria-label="Footer">
+        <a href="#source-terms">Source terms</a>
+        <a href="./">Guide</a>
+      </nav>
+    </div>
+  </footer>
+</body>
+</html>

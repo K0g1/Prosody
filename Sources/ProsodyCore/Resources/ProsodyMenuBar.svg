@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="112 104 832 832" fill="none">
+  <title>Prosody</title>
+  <desc>The Prosody app's paperclip and three audio bars, in solid white on a transparent background.</desc>
+  <g stroke="#FFFFFF" stroke-linecap="round">
+    <path d="M 615 746 L 539 822 C 457 904 323 904 241 822 C 159 740 159 606 241 524 L 551 214 C 625 140 745 140 819 214 C 893 288 893 408 819 482 L 713 588 C 671 630 603 630 561 588 C 519 546 519 478 561 436 L 657 340"
+          stroke-width="58"/>
+    <path d="M 324 660 V 724 M 416 602 V 770 M 508 654 V 718"
+          stroke-width="50"/>
+  </g>
+</svg>
