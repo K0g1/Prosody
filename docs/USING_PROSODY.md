@@ -64,4 +64,4 @@ Distributed builds may retain the bundle identifier and signing identity for upg
 
 This source snapshot does not include a signed installer or notarized build.
 
-For help, Use the project's issue tracker once a neutral destination is configured. Include the Prosody version and build, macOS version, and steps to reproduce. Use disposable examples and redact personal data. For vulnerabilities, see the [security policy](../SECURITY.md). The source and assets remain all rights reserved under [LICENSE](../LICENSE).
+For help, use the project issue tracker. Include the Prosody version and build, macOS version, and steps to reproduce. Use disposable examples and redact personal data. For vulnerabilities, see the [security policy](../SECURITY.md). The source and assets remain all rights reserved under [LICENSE](../LICENSE).
