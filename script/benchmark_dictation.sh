@@ -5,6 +5,7 @@ usage() {
   cat <<'EOF'
 Usage: script/benchmark_dictation.sh [--quick | --thorough] [--repeat N]
                                     [--compare-archive] [--fixtures-only]
+                                    [--binary PATH]
 
 Runs an optimized ProsodyValidation against the locally installed Parakeet
 Unified model. No mic, UI, clipboard, history, or model downloads.
@@ -17,6 +18,8 @@ Unified model. No mic, UI, clipboard, history, or model downloads.
   --repeat N         Override the repeat count for the short speech clips.
   --compare-archive  Also time the previous file-first path (diagnostic).
   --fixtures-only    Generate and verify the audio, without Swift or Core ML.
+  --binary PATH      Run an already-built ProsodyValidation binary instead of
+                     `swift run` (relative paths are resolved before chdir).
 
 The first speech trial is reported separately from warm trials. Correctness
 gates check no-ops, transcript words and endings, duration, and AAC recovery;
@@ -31,6 +34,7 @@ mode=quick
 repeats=
 compare_archive=0
 fixtures_only=0
+binary=
 while (( $# > 0 )); do
   case "$1" in
     --quick) mode=quick ;;
@@ -42,6 +46,16 @@ while (( $# > 0 )); do
       ;;
     --compare-archive) compare_archive=1 ;;
     --fixtures-only) fixtures_only=1 ;;
+    --binary)
+      shift
+      [[ -n ${1:-} ]] || die "--binary requires a path."
+      if [[ "$1" = /* ]]; then
+        binary=$1
+      else
+        binary="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+      fi
+      [[ -x "$binary" ]] || die "--binary is not executable: $binary"
+      ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown argument: $1 (see --help)" ;;
   esac
@@ -176,4 +190,8 @@ else
   args+=(--reference "$scratch/command.txt" "$scratch/command-16k.wav")
   args+=(--repeat 1 --verify-fallback --reference "$scratch/long.txt" "$scratch/long.wav")
 fi
-swift run --force-resolved-versions --configuration release ProsodyValidation "${args[@]}"
+if [[ -n "$binary" ]]; then
+  "$binary" "${args[@]}"
+else
+  swift run --force-resolved-versions --configuration release ProsodyValidation "${args[@]}"
+fi

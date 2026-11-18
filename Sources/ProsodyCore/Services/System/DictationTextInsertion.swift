@@ -87,7 +87,8 @@ struct DictationTextDestination {
         onDispatched: () -> Void = {},
         waitForGestureRelease: () async -> Void = {},
         gestureIsHeld: () -> Bool = { false },
-        onReceipt: (DictationInsertionReceipt) -> Void = { _ in }
+        onReceipt: (DictationInsertionReceipt) -> Void = { _ in },
+        smartCapitalization: Bool = true
     ) async -> Bool {
         let logger = Logger(subsystem: AppConstants.bundleIdentifier, category: "dictation-insertion")
         guard !text.isEmpty, AXIsProcessTrusted() else {
@@ -122,21 +123,27 @@ struct DictationTextDestination {
         }
         guard CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty else { return false }
         let originalSelection = selectedRange
-        let expectedSelection = DictationSelectionRebase.expectedCaret(
-            after: originalSelection, insertedUTF16Count: text.utf16.count)
-        let receipt = DictationInsertionReceipt(
-            destination: self, originalSelection: originalSelection, expectedSelection: expectedSelection)
+        // Capitalization is delivery-only. The transcript and archive retain
+        // the caller's original text.
         if method == .typing {
-            guard destinationIsCurrent() else { return false }
-            let inserted = await typeText(
+            let validation = validateDestination()
+            guard validation.isCurrent else { return false }
+            let insertionText = capitalizedInsertionText(
                 text,
+                contextElement: validation.capitalizationElement,
+                selection: validation.capitalizationSelection,
+                smartCapitalization: smartCapitalization
+            )
+            let receipt = insertionReceipt(for: insertionText, originalSelection: originalSelection)
+            let inserted = await typeText(
+                insertionText,
                 waitForGestureRelease: waitForGestureRelease,
                 gestureIsHeld: gestureIsHeld
             ) {
                 onDispatched()
                 onReceipt(receipt)
             }
-            if inserted && keepOnClipboard { Self.copy(text) }
+            if inserted && keepOnClipboard { Self.copy(insertionText) }
             return inserted
         }
         guard let source = CGEventSource(stateID: .privateState),
@@ -149,13 +156,21 @@ struct DictationTextDestination {
         let previous = keepOnClipboard ? nil : DictationClipboardSnapshot(pasteboard)
         // A clipboard owner may be slow to provide its data. Do the focus and
         // selection check after that work, as close to dispatch as possible.
+        let validation = validateDestination()
         guard CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty,
-              destinationIsCurrent() else {
+              validation.isCurrent else {
             logger.info("Insertion deferred: destination or keyboard state changed")
             return false
         }
+        let insertionText = capitalizedInsertionText(
+            text,
+            contextElement: validation.capitalizationElement,
+            selection: validation.capitalizationSelection,
+            smartCapitalization: smartCapitalization
+        )
+        let receipt = insertionReceipt(for: insertionText, originalSelection: originalSelection)
         let ourChange = pasteboard.clearContents()
-        guard pasteboard.setString(text, forType: .string), pasteboard.changeCount == ourChange,
+        guard pasteboard.setString(insertionText, forType: .string), pasteboard.changeCount == ourChange,
               applicationIsCurrent else {
             previous?.restore(ifUnchangedSince: ourChange)
             return false
@@ -273,25 +288,102 @@ struct DictationTextDestination {
         !application.isTerminated && NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier
     }
 
+    /// Read and transform only after gesture waits and destination rebasing.
+    /// Any uncertain AX state keeps the original insertion text.
+    private func capitalizedInsertionText(
+        _ text: String,
+        contextElement: AXUIElement?,
+        selection: CFRange?,
+        smartCapitalization: Bool
+    ) -> String {
+        guard smartCapitalization, let contextElement, let selection else { return text }
+        return SmartDictationCapitalization.applyValidated(
+            to: text,
+            smartCapitalization: true,
+            element: contextElement,
+            selection: selection,
+            access: .live
+        )
+    }
+
+    private func insertionReceipt(
+        for text: String,
+        originalSelection: CFRange?
+    ) -> DictationInsertionReceipt {
+        DictationInsertionReceipt(
+            destination: self,
+            originalSelection: originalSelection,
+            expectedSelection: DictationSelectionRebase.expectedCaret(
+                after: originalSelection,
+                insertedUTF16Count: text.utf16.count
+            )
+        )
+    }
+
+    @MainActor private struct DestinationValidation {
+        let isCurrent: Bool
+        let capitalizationElement: AXUIElement?
+        let capitalizationSelection: CFRange?
+
+        @MainActor static let invalid = Self(
+            isCurrent: false,
+            capitalizationElement: nil,
+            capitalizationSelection: nil
+        )
+    }
+
     private func destinationIsCurrent(checkSelection: Bool = true) -> Bool {
-        guard applicationIsCurrent else { return false }
+        validateDestination(checkSelection: checkSelection).isCurrent
+    }
+
+    /// Preserves the beta insertion gate. A separate capitalization payload is
+    /// returned only when the same element's live caret was actually read and
+    /// matched the captured range.
+    private func validateDestination(checkSelection: Bool = true) -> DestinationValidation {
+        guard applicationIsCurrent else { return .invalid }
         let app = AXUIElementCreateApplication(application.processIdentifier)
         AXUIElementSetMessagingTimeout(app, 0.25)
-        if let window, let currentWindow = Self.elementAttribute(app, kAXFocusedWindowAttribute),
-           !CFEqual(window, currentWindow) { return false }
-        let focused = Self.elementAttribute(app, kAXFocusedUIElementAttribute)
-        if let element, Self.isSecure(element) { return false }
-        if let focused, Self.isSecure(focused) { return false }
-        if let element, let focused {
-            // Two different known text fields are a real focus change. Web
-            // areas and custom accessibility proxies can be recreated while
-            // the same editor keeps focus; do not require proxy identity there.
-            if !CFEqual(element, focused), Self.isTextControl(element), Self.isTextControl(focused) { return false }
-            if checkSelection, CFEqual(element, focused), let selection,
-               let current = Self.attribute(focused, kAXSelectedTextRangeAttribute),
-               !CFEqual(selection, current) { return false }
+        var windowIdentityKnown = true
+        if let window {
+            if let currentWindow = Self.elementAttribute(app, kAXFocusedWindowAttribute) {
+                if !CFEqual(window, currentWindow) { return .invalid }
+            } else {
+                // Missing metadata alone did not block beta insertion. It does
+                // block capitalization because focus identity is less certain.
+                windowIdentityKnown = false
+            }
         }
-        return true
+        let focused = Self.elementAttribute(app, kAXFocusedUIElementAttribute)
+        if let element, Self.isSecure(element) { return .invalid }
+        if let focused, Self.isSecure(focused) { return .invalid }
+
+        var capitalizationElement: AXUIElement?
+        var capitalizationSelection: CFRange?
+        if let element, let focused {
+            let sameElement = CFEqual(element, focused)
+            // Preserve beta rejection: two known text controls at different AX
+            // identities are treated as a real field switch even when roles and
+            // ranges happen to match.
+            if !sameElement, Self.isTextControl(element), Self.isTextControl(focused) {
+                return .invalid
+            }
+            if checkSelection, sameElement, let selection {
+                if let current = Self.attribute(focused, kAXSelectedTextRangeAttribute) {
+                    guard CFEqual(selection, current) else { return .invalid }
+                    if windowIdentityKnown, let currentRange = Self.range(from: current) {
+                        capitalizationElement = focused
+                        capitalizationSelection = currentRange
+                    }
+                }
+                // An unreadable caret still permits the baseline raw insertion,
+                // but never permits a capitalization read.
+            }
+        }
+        return DestinationValidation(
+            isCurrent: true,
+            capitalizationElement: capitalizationElement,
+            capitalizationSelection: capitalizationSelection
+        )
     }
 
     static func copy(_ text: String) {
@@ -329,7 +421,13 @@ struct DictationTextDestination {
         return (value as! AXUIElement)
     }
     private static func isTextControl(_ element: AXUIElement) -> Bool {
-        let role = attribute(element, kAXRoleAttribute) as? String
+        guard let role = role(element) else { return false }
+        return isTextRole(role)
+    }
+    private static func role(_ element: AXUIElement) -> String? {
+        attribute(element, kAXRoleAttribute) as? String
+    }
+    private static func isTextRole(_ role: String) -> Bool {
         return role == kAXTextFieldRole || role == kAXTextAreaRole || role == kAXComboBoxRole
     }
     private static func isSecure(_ element: AXUIElement) -> Bool {

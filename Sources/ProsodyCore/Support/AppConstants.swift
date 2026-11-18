@@ -13,12 +13,12 @@ public enum AppConstants {
     }()
     public static let appVersion: String =
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "1.2.0"
-    /// The Alpha 8 packaging key remains a compatibility contract. The staged
+    /// The legacy packaging key remains a compatibility contract. The staged
     /// plist supplies the release label; source fallback stays the base version.
     public static let releaseLabel: String =
         (Bundle.main.object(forInfoDictionaryKey: "ClippyReleaseLabel") as? String) ?? appVersion
     public static let buildNumber: String =
-        (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "12"
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "13"
     // FluidAudio's `Repo.parakeetUnified.folderName` is the cache directory
     // used by `StreamingUnifiedAsrManager.loadModels(to:)`.
     public static let modelCacheFolderName = "parakeet-unified-en-0.6b"

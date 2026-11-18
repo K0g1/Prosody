@@ -446,6 +446,253 @@ final class DictationQueueTests: XCTestCase {
                                fixture.captures[1].started, fixture.deliveries.fulfilled], timeout: 0.1)
     }
 
+    func testCancelDuringModelLoadIsImmediatelyIdleAndAllowsNextCapture() async throws {
+        let loadStarted = expectation(description: "model load started")
+        let modelUnloaded = expectation(description: "cancelled model unloaded")
+        modelUnloaded.assertForOverFulfill = false
+        let loadGate = DeliveryGate()
+        var saves: [TimeInterval] = []
+        var recoveries: [TimeInterval] = []
+        let fixture = makeFixture(
+            deliveryCount: 0,
+            saveDictation: { _, duration, _ in saves.append(duration) },
+            preserveFailedDictation: { duration, _ in
+                recoveries.append(duration)
+                return true
+            },
+            modelLoadGate: loadGate,
+            modelLoadStarted: loadStarted,
+            onModelUnload: { modelUnloaded.fulfill() }
+        )
+        let first = fixture.captures[0]
+        let second = fixture.captures[1]
+
+        fixture.controller.start()
+        await fulfillment(of: [first.started], timeout: 2)
+        fixture.controller.finish()
+        await fulfillment(of: [loadStarted], timeout: 2)
+        await waitForMessage(fixture.controller, containing: "Preparing speech model")
+
+        fixture.controller.cancel()
+        XCTAssertEqual(fixture.controller.state, .idle)
+        XCTAssertFalse(fixture.controller.isActive)
+        XCTAssertEqual(fixture.controller.meter, .zero)
+        XCTAssertTrue(fixture.controller.message.isEmpty)
+
+        // The old native load may ignore cancellation. That must not hold the
+        // controller or the next gesture.
+        fixture.controller.start()
+        await fulfillment(of: [second.started], timeout: 2)
+        await waitForState(fixture.controller, .listening)
+        XCTAssertEqual(fixture.controller.state, .listening)
+        XCTAssertTrue(fixture.controller.message.contains("Listening"))
+
+        fixture.controller.cancel()
+        XCTAssertEqual(fixture.controller.state, .idle)
+        await loadGate.open()
+        // Let both cancelled cleanup workers unwind after the fake load gate
+        // opens; the controller is already idle before this wait.
+        await waitForCleanup(fixture.controller)
+        await fulfillment(of: [modelUnloaded], timeout: 2)
+        await waitForIdle(fixture.controller)
+
+        XCTAssertTrue(fixture.deliveries.events.isEmpty)
+        XCTAssertTrue(saves.isEmpty)
+        XCTAssertTrue(recoveries.isEmpty)
+    }
+
+    func testListeningPreparingAndTranscribingStatusFollowActualPhase() async throws {
+        let loadStarted = expectation(description: "model load started")
+        let loadGate = DeliveryGate()
+        let fixture = makeFixture(
+            deliveryCount: 1,
+            modelLoadGate: loadGate,
+            modelLoadStarted: loadStarted
+        )
+        let first = fixture.captures[0]
+
+        fixture.controller.start()
+        await fulfillment(of: [first.started], timeout: 2)
+        XCTAssertEqual(fixture.controller.state, .listening)
+        XCTAssertTrue(fixture.controller.message.contains("Listening"))
+
+        fixture.controller.finish()
+        await fulfillment(of: [loadStarted], timeout: 2)
+        await waitForMessage(fixture.controller, containing: "Preparing speech model")
+        XCTAssertEqual(fixture.controller.state, .preparing)
+
+        await loadGate.open()
+        await fulfillment(of: [fixture.firstSuspended], timeout: 2)
+        await waitForState(fixture.controller, .transcribing)
+        XCTAssertTrue(fixture.controller.message.contains("Transcribing"))
+
+        await fixture.decoder.release("one")
+        await fulfillment(of: [fixture.deliveries.fulfilled], timeout: 2)
+        await waitForIdle(fixture.controller)
+    }
+
+    func testFirstReleaseShowsFinishingBeforeWorkerPicksItUp() async throws {
+        let fixture = makeFixture(
+            deliveryCount: 0,
+            firstCaptureEmitsPacket: false
+        )
+        let first = fixture.captures[0]
+
+        fixture.controller.start()
+        await fulfillment(of: [first.started], timeout: 2)
+        fixture.controller.finish()
+
+        XCTAssertEqual(fixture.controller.state, .preparing)
+        XCTAssertEqual(fixture.controller.message, "Finishing audio… · Esc to cancel")
+        await waitForIdle(fixture.controller)
+        XCTAssertTrue(fixture.deliveries.events.isEmpty)
+    }
+
+    func testFailedRecognitionPreservesCapturedAudioOnceWithoutDelivery() async throws {
+        let model = FailingRecognitionModel()
+        var recoveryDurations: [TimeInterval] = []
+        var recoveryDirectories: [URL] = []
+        var saveCount = 0
+        let fixture = makeFixture(
+            deliveryCount: 0,
+            saveDictation: { _, _, _ in saveCount += 1 },
+            preserveFailedDictation: { duration, archive in
+                recoveryDurations.append(duration)
+                let directory = await archive.directoryURL
+                recoveryDirectories.append(directory)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+                return true
+            },
+            recognitionModel: model
+        )
+        let first = fixture.captures[0]
+
+        fixture.controller.start()
+        await fulfillment(of: [first.started], timeout: 2)
+        fixture.controller.finish()
+        await waitForInactive(fixture.controller)
+
+        XCTAssertEqual(recoveryDurations.count, 1)
+        XCTAssertEqual(recoveryDirectories.count, 1)
+        XCTAssertGreaterThanOrEqual(recoveryDurations[0], DictationAudioPipeline.minimumDuration)
+        let sessions = await model.sessionCount()
+        XCTAssertEqual(sessions, 2, "One live pass and exactly one archive replay should run.")
+        XCTAssertTrue(fixture.deliveries.events.isEmpty)
+        XCTAssertEqual(saveCount, 0)
+        XCTAssertTrue(fixture.controller.message.contains("Audio saved in Recovery."))
+    }
+
+    func testCancelDuringRecoveryAdoptionDoesNotDiscardArchive() async throws {
+        let model = FailingRecognitionModel()
+        let recoveryStarted = expectation(description: "recovery adoption started")
+        let recoveryGate = DeliveryGate()
+        var recoveryCount = 0
+        let fixture = makeFixture(
+            deliveryCount: 0,
+            preserveFailedDictation: { _, archive in
+                recoveryCount += 1
+                recoveryStarted.fulfill()
+                await recoveryGate.wait()
+                let directory = await archive.directoryURL
+                XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+                return true
+            },
+            recognitionModel: model
+        )
+        let first = fixture.captures[0]
+
+        fixture.controller.start()
+        await fulfillment(of: [first.started], timeout: 2)
+        fixture.controller.finish()
+        await fulfillment(of: [recoveryStarted], timeout: 2)
+        XCTAssertEqual(fixture.controller.state, .delivering)
+
+        // Recovery owns the archive while adoption is in flight. Escape must
+        // not start a concurrent discard or remove the committed failure.
+        fixture.controller.cancel()
+        XCTAssertEqual(fixture.controller.state, .delivering)
+        XCTAssertTrue(fixture.controller.isActive)
+
+        await recoveryGate.open()
+        await waitForInactive(fixture.controller)
+        XCTAssertEqual(recoveryCount, 1)
+        XCTAssertTrue(fixture.controller.message.contains("Audio saved in Recovery."))
+    }
+
+    func testPrewarmRequiresGrantsAndCoalescesRepeatedRequests() async throws {
+        let loadCounter = LoadCounter()
+        let permissionRequested = expectation(description: "microphone permission requested")
+        permissionRequested.isInverted = true
+        let fixture = makeFixture(
+            deliveryCount: 0,
+            requireMicrophonePermission: { permissionRequested.fulfill() },
+            canPrewarmRecognition: true,
+            idleRetention: .seconds(30),
+            onModelLoad: { await loadCounter.increment() }
+        )
+
+        fixture.controller.prewarmRecognition()
+        await waitForLoadCount(loadCounter, 1)
+        fixture.controller.prewarmRecognition()
+        await yieldMainActor()
+        let loadCount = await loadCounter.value()
+        XCTAssertEqual(loadCount, 1)
+        XCTAssertEqual(fixture.controller.state, .idle)
+        await waitDetached(for: permissionRequested, timeout: 0.1)
+
+        let deniedCounter = LoadCounter()
+        let denied = makeFixture(
+            deliveryCount: 0,
+            canPrewarmRecognition: false,
+            onModelLoad: { await deniedCounter.increment() }
+        )
+        denied.controller.prewarmRecognition()
+        await yieldMainActor()
+        let deniedLoadCount = await deniedCounter.value()
+        XCTAssertEqual(deniedLoadCount, 0)
+    }
+
+    func testGesturePrewarmRunsAgainAfterModelUnload() async throws {
+        let loadCounter = LoadCounter()
+        let unloadCounter = UnloadCounter()
+        let model = PrewarmCountingModel(onUnload: { await unloadCounter.increment() })
+        let fixture = makeFixture(
+            deliveryCount: 0,
+            canPrewarmRecognition: true,
+            recognitionModel: model,
+            idleRetention: .seconds(1),
+            onModelLoad: { await loadCounter.increment() }
+        )
+
+        fixture.controller.prewarmRecognition()
+        await waitForLoadCount(loadCounter, 1)
+        await waitForUnloadCount(unloadCounter, 1)
+
+        fixture.controller.start()
+        await waitForLoadCount(loadCounter, 2)
+        let loadsAfterGesture = await loadCounter.value()
+        XCTAssertEqual(loadsAfterGesture, 2)
+        fixture.controller.cancel()
+        await waitForIdle(fixture.controller)
+    }
+
+    func testSmartCapitalizationSnapshotReachesDestination() async throws {
+        var preferences = DictationPreferencesSnapshot()
+        preferences.smartCapitalization = false
+        let fixture = makeFixture(deliveryCount: 1, preferences: preferences)
+        let first = fixture.captures[0]
+
+        fixture.controller.start()
+        await fulfillment(of: [first.started], timeout: 2)
+        fixture.controller.finish()
+        await fulfillment(of: [fixture.firstSuspended], timeout: 2)
+        await fixture.decoder.release("one")
+        await fulfillment(of: [fixture.deliveries.fulfilled], timeout: 2)
+        await waitForIdle(fixture.controller)
+
+        XCTAssertEqual(fixture.deliveries.events.first?.smartCapitalization, false)
+    }
+
     func testSelectionRebaseRequiresSameFieldRangeAndExpectedCaret() {
         let original = CFRange(location: 10, length: 0)
         let expected = DictationSelectionRebase.expectedCaret(after: original, insertedUTF16Count: 4)
@@ -507,37 +754,66 @@ final class DictationQueueTests: XCTestCase {
         gestureWaitStarted: XCTestExpectation? = nil,
         afterFirstDispatch: (@MainActor () async -> Void)? = nil,
         firstCaptureStartError: Error? = nil,
+        firstCaptureEmitsPacket: Bool = true,
         waitForSecondRecognition: Bool = false,
         secondCaptureStartError: Error? = nil,
         secondCaptureEmitsPacket: Bool = true,
         deliveryResults: [Bool] = [],
         copyText: (@MainActor (String) -> Void)? = nil,
         shortcutSettings: ShortcutSettings? = nil,
-        shortcutMonitorStore: ShortcutMonitorStore? = nil
+        shortcutMonitorStore: ShortcutMonitorStore? = nil,
+        preferences: DictationPreferencesSnapshot = .init(),
+        saveDictation: (@MainActor (Transcript, TimeInterval, AudioArchiveWriter) async throws -> Void)? = nil,
+        preserveFailedDictation: (@MainActor (TimeInterval, AudioArchiveWriter) async throws -> Bool)? = nil,
+        requireMicrophonePermission: (@Sendable () async throws -> Void)? = nil,
+        canPrewarmRecognition: Bool = false,
+        recognitionModel: (any DictationRecognitionModel)? = nil,
+        idleRetention: Duration = .zero,
+        modelLoadGate: DeliveryGate? = nil,
+        modelLoadStarted: XCTestExpectation? = nil,
+        onModelLoad: (@Sendable () async -> Void)? = nil,
+        onModelUnload: (@Sendable () async -> Void)? = nil,
+        onSession: (@Sendable (Int) -> Void)? = nil
     ) -> Fixture {
-        let firstSuspended = expectation(description: "first decoder suspended")
-        let secondSuspended = expectation(description: "second decoder suspended")
+        let firstSuspended = XCTestExpectation(description: "first decoder suspended")
+        let secondSuspended = XCTestExpectation(description: "second decoder suspended")
         let secondRecognitionStarted: XCTestExpectation? = waitForSecondRecognition
-            ? expectation(description: "second recognition started") : nil
+            ? XCTestExpectation(description: "second recognition started") : nil
         let decoder = SuspendedDecoder { key in
             if key == "one" { firstSuspended.fulfill() }
             if key == "two" { secondSuspended.fulfill() }
         }
-        let model = TestRecognitionModel(decoder: decoder) { count in
-            if count == 2 { secondRecognitionStarted?.fulfill() }
-        }
-        let recognizer = DictationRecognizer(idleRetention: .zero) {
-            model
+        let model: any DictationRecognitionModel = recognitionModel ?? TestRecognitionModel(
+            decoder: decoder,
+            onSession: { count in
+                if count == 2 { secondRecognitionStarted?.fulfill() }
+                onSession?(count)
+            },
+            onUnload: {
+                await onModelUnload?()
+            }
+        )
+        let recognizer = DictationRecognizer(idleRetention: idleRetention) {
+            if let onModelLoad { await onModelLoad() }
+            if let modelLoadGate {
+                modelLoadStarted?.fulfill()
+                await modelLoadGate.wait()
+            }
+            return model
         }
         let firstCapture = TestDictationCapture(
-            marker: 0.1, started: expectation(description: "first capture started"),
-            startError: firstCaptureStartError)
+            marker: 0.1, started: XCTestExpectation(description: "first capture started"),
+            startError: firstCaptureStartError, emitsPacket: firstCaptureEmitsPacket)
         let secondCapture = TestDictationCapture(
-            marker: 0.2, started: expectation(description: "second capture started"),
+            marker: 0.2, started: XCTestExpectation(description: "second capture started"),
             startError: secondCaptureStartError, emitsPacket: secondCaptureEmitsPacket)
         let captureStore = CaptureStore(captures: [firstCapture, secondCapture])
-        let delivered = expectation(description: "dictation deliveries")
-        delivered.expectedFulfillmentCount = deliveryCount
+        let delivered = XCTestExpectation(description: "dictation deliveries")
+        if deliveryCount == 0 {
+            delivered.isInverted = true
+        } else {
+            delivered.expectedFulfillmentCount = deliveryCount
+        }
         let deliveries = DeliveryRecorder(fulfilled: delivered)
         let destinationStore = DestinationStore(
             deliveries: deliveries,
@@ -548,11 +824,12 @@ final class DictationQueueTests: XCTestCase {
         )
         let dependencies = DictationController.Dependencies(
             canStart: { true },
+            preferences: { preferences },
             frontmostApplication: { nil },
             makeCapture: { captureStore.next() },
             resolveDestination: { _ in destinationStore.next() },
-            requireMicrophonePermission: {},
-            saveDictation: { _, _, _ in },
+            requireMicrophonePermission: requireMicrophonePermission ?? {},
+            saveDictation: saveDictation ?? { _, _, _ in },
             recognizer: recognizer,
             shortcut: { shortcutSettings?.shortcut ?? .rightCommand },
             activation: { shortcutSettings?.activation ?? .hold },
@@ -572,7 +849,9 @@ final class DictationQueueTests: XCTestCase {
             copyText: { text in
                 if let copyText { copyText(text) }
                 else { DictationTextDestination.copy(text) }
-            }
+            },
+            canPrewarmRecognition: { canPrewarmRecognition },
+            preserveFailedDictation: preserveFailedDictation ?? { _, _ in false }
         )
         return Fixture(
             controller: DictationController(dependencies: dependencies),
@@ -620,6 +899,53 @@ final class DictationQueueTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertFalse(controller.isActive)
+    }
+
+    private func waitForState(_ controller: DictationController, _ expected: DictationState) async {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while controller.state != expected, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(controller.state, expected)
+    }
+
+    private func waitForMessage(
+        _ controller: DictationController,
+        containing fragment: String
+    ) async {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !controller.message.contains(fragment), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(controller.message.contains(fragment), "Unexpected message: \(controller.message)")
+    }
+
+    private func waitForCleanup(_ controller: DictationController) async {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while controller.hasPendingCleanup, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(controller.hasPendingCleanup)
+    }
+
+    private func waitForLoadCount(_ counter: LoadCounter, _ expected: Int) async {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            if await counter.value() >= expected { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let actual = await counter.value()
+        XCTAssertGreaterThanOrEqual(actual, expected)
+    }
+
+    private func waitForUnloadCount(_ counter: UnloadCounter, _ expected: Int) async {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < deadline {
+            if await counter.value() >= expected { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let actual = await counter.value()
+        XCTAssertEqual(actual, expected)
     }
 
     private func yieldMainActor() async {
@@ -710,6 +1036,67 @@ private final class TestShortcutMonitor: DictationShortcutMonitoring {
 
 private enum TestFailure: Error {
     case start
+    case recognition
+}
+
+private actor LoadCounter {
+    private var count = 0
+
+    func increment() { count += 1 }
+    func value() -> Int { count }
+}
+
+private actor UnloadCounter {
+    private var count = 0
+
+    func increment() { count += 1 }
+    func value() -> Int { count }
+}
+
+private actor FailingRecognitionModel: DictationRecognitionModel {
+    private var sessions = 0
+
+    func makeDictationSession(
+        configuration: TranscriptSegmentationConfiguration
+    ) async throws -> any DictationRecognitionSession {
+        sessions += 1
+        return FailingRecognitionSession()
+    }
+
+    func reset() async throws {}
+    func sessionCount() -> Int { sessions }
+}
+
+private actor FailingRecognitionSession: DictationRecognitionSession {
+    func append(samples: [Float], startTime: TimeInterval) async throws {}
+
+    func finishDictation(
+        appending samples: [Float],
+        startTime: TimeInterval,
+        endTime: TimeInterval
+    ) async throws -> FinalTranscript {
+        throw TestFailure.recognition
+    }
+
+    func cancel() async {}
+}
+
+private actor PrewarmCountingModel: DictationRecognitionModel {
+    private let decoder = SuspendedDecoder { _ in }
+    private let onUnload: @Sendable () async -> Void
+
+    init(onUnload: @escaping @Sendable () async -> Void = {}) {
+        self.onUnload = onUnload
+    }
+
+    func makeDictationSession(
+        configuration: TranscriptSegmentationConfiguration
+    ) async throws -> any DictationRecognitionSession {
+        TestRecognitionSession(decoder: decoder)
+    }
+
+    func reset() async throws {}
+    func unload() async { await onUnload() }
 }
 
 private final class TestDictationCapture: DictationCapture, @unchecked Sendable {
@@ -770,6 +1157,7 @@ private final class DeliveryRecorder {
     struct Event {
         let target: String
         let text: String
+        let smartCapitalization: Bool
     }
 
     private(set) var events: [Event] = []
@@ -779,8 +1167,8 @@ private final class DeliveryRecorder {
         self.fulfilled = fulfilled
     }
 
-    func record(target: String, text: String) {
-        events.append(Event(target: target, text: text))
+    func record(target: String, text: String, smartCapitalization: Bool) {
+        events.append(Event(target: target, text: text, smartCapitalization: smartCapitalization))
         fulfilled.fulfill()
     }
 }
@@ -856,14 +1244,15 @@ private final class TestDestination: DictationTextDelivering {
         onDispatched: () -> Void,
         waitForGestureRelease: () async -> Void,
         gestureIsHeld: () -> Bool,
-        onReceipt: (DictationInsertionReceipt) -> Void
+        onReceipt: (DictationInsertionReceipt) -> Void,
+        smartCapitalization: Bool
     ) async -> Bool {
         if waitForGesture, gestureIsHeld() {
             gestureWaitStarted?.fulfill()
             await waitForGestureRelease()
         }
         guard !Task.isCancelled else { return false }
-        deliveries.record(target: identifier, text: text)
+        deliveries.record(target: identifier, text: text, smartCapitalization: smartCapitalization)
         onDispatched()
         if let afterDispatch { await afterDispatch() }
         return result
@@ -941,11 +1330,17 @@ private actor SuspendedDecoder {
 private actor TestRecognitionModel: DictationRecognitionModel {
     let decoder: SuspendedDecoder
     private let onSession: @Sendable (Int) -> Void
+    private let onUnload: @Sendable () async -> Void
     private var sessions = 0
 
-    init(decoder: SuspendedDecoder, onSession: @escaping @Sendable (Int) -> Void = { _ in }) {
+    init(
+        decoder: SuspendedDecoder,
+        onSession: @escaping @Sendable (Int) -> Void = { _ in },
+        onUnload: @escaping @Sendable () async -> Void = {}
+    ) {
         self.decoder = decoder
         self.onSession = onSession
+        self.onUnload = onUnload
     }
 
     func makeDictationSession(
@@ -957,6 +1352,7 @@ private actor TestRecognitionModel: DictationRecognitionModel {
     }
 
     func reset() async throws {}
+    func unload() async { await onUnload() }
 }
 
 private actor TestRecognitionSession: DictationRecognitionSession {

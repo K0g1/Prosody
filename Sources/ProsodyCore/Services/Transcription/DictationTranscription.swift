@@ -8,6 +8,7 @@ public actor DictationAudioPipeline {
 
     private let archive: AudioArchiveWriter
     private let replay: @Sendable ([URL]) async throws -> AudioFileTranscription
+    private let finishScope: (@Sendable () async -> Void)?
     private let input: AsyncStream<CapturedAudioPacket>.Continuation
     private let recognition: Task<AudioFileTranscription?, Error>
     private var archiveReplay: Task<AudioFileTranscription?, Error>?
@@ -15,10 +16,13 @@ public actor DictationAudioPipeline {
     private var archiveWriteWaiters: [CheckedContinuation<Void, Never>] = []
     private var captureFailure: (any Error)?
     private var duration: TimeInterval = 0
+    private var archivedDuration: TimeInterval = 0
     private var hasSignal = false
     private var liveInputLost = false
     private var ended = false
     private var cancelled = false
+    private var scopeFinished = false
+    private var scopeFinishTask: Task<Void, Never>?
 
     public init(
         archive: AudioArchiveWriter,
@@ -26,10 +30,17 @@ public actor DictationAudioPipeline {
         configuration: TranscriptSegmentationConfiguration,
         replay: (@Sendable ([URL]) async throws -> AudioFileTranscription)? = nil
     ) {
+        let scope = UUID()
         self.init(archive: archive, bufferCapacity: 256, recognize: { packets in
-            try await recognizer.transcribe(packets, configuration: configuration)
+            try await recognizer.transcribe(
+                packets, configuration: configuration, scope: scope
+            )
         }, replay: replay ?? { urls in
-            try await AudioFileTranscriber(segmentationConfiguration: configuration).transcribe(files: [.microphone: urls])
+            try await recognizer.replayArchive(
+                urls, configuration: configuration, scope: scope
+            )
+        }, finishScope: {
+            await recognizer.finishScope(scope)
         })
     }
 
@@ -39,10 +50,12 @@ public actor DictationAudioPipeline {
         archive: AudioArchiveWriter,
         bufferCapacity: Int,
         recognize: @escaping @Sendable (AsyncStream<CapturedAudioPacket>) async throws -> AudioFileTranscription?,
-        replay: @escaping @Sendable ([URL]) async throws -> AudioFileTranscription
+        replay: @escaping @Sendable ([URL]) async throws -> AudioFileTranscription,
+        finishScope: (@Sendable () async -> Void)? = nil
     ) {
         self.archive = archive
         self.replay = replay
+        self.finishScope = finishScope
         let (packets, input) = AsyncStream.makeStream(
             of: CapturedAudioPacket.self, bufferingPolicy: .bufferingOldest(max(1, bufferCapacity))
         )
@@ -55,9 +68,18 @@ public actor DictationAudioPipeline {
     }
 
     deinit {
-        recognition.cancel()
         input.finish()
-        archiveReplay?.cancel()
+        let recognition = self.recognition
+        let replay = archiveReplay
+        recognition.cancel()
+        replay?.cancel()
+        if !scopeFinished, let finishScope {
+            Task {
+                _ = await recognition.result
+                _ = await replay?.result
+                await finishScope()
+            }
+        }
     }
 
     /// Called by a single consumer in capture order.
@@ -87,6 +109,11 @@ public actor DictationAudioPipeline {
                     input.finish()
                 }
             }
+            // Publish capture state before the archive actor suspends. finish()
+            // can then decide whether a short/silent no-op needs cancellation
+            // without waiting behind an in-flight AAC write.
+            duration += Double(packet.samples.count) / packet.sampleRate
+            if !hasSignal { hasSignal = packet.samples.contains { $0 != 0 } }
             archiveWriteInFlight = true
             defer {
                 archiveWriteInFlight = false
@@ -95,26 +122,39 @@ public actor DictationAudioPipeline {
                 for waiter in waiters { waiter.resume() }
             }
             try await archive.append(packet)
+            archivedDuration += Double(packet.samples.count) / packet.sampleRate
         } catch {
             captureFailure = error
             recognition.cancel()
             input.finish()
             throw error
         }
-        duration += Double(packet.samples.count) / packet.sampleRate
-        if !hasSignal { hasSignal = packet.samples.contains { $0 != 0 } }
         try checkCancellation()
     }
 
     public func finish() async throws -> (audio: AudioFileTranscription, usedArchive: Bool)? {
         guard !ended, !cancelled else { throw STTError.sessionFinished }
         ended = true
+        do {
+            let result = try await finishOnce()
+            await finishScopeOnce()
+            return result
+        } catch {
+            await finishScopeOnce()
+            throw error
+        }
+    }
+
+    private func finishOnce() async throws -> (audio: AudioFileTranscription, usedArchive: Bool)? {
         input.finish()
         let recognition = self.recognition
+        let hasSpeechCandidate = hasSignal && Self.reachesMinimum(duration)
+        // A short or silent capture has no reason to retain a model operation.
+        // Cancel it before waiting for archive I/O so a no-op pipeline can
+        // complete promptly even if a shared preparation is still running.
+        if !hasSpeechCandidate { recognition.cancel() }
         let result: Result<AudioFileTranscription?, any Error>? = try await withTaskCancellationHandler {
             await waitForArchiveWrite()
-            let hasSpeechCandidate = hasSignal && Self.reachesMinimum(duration)
-            if !hasSpeechCandidate { recognition.cancel() }
             let result = await recognition.result
             try checkCancellation()
             if let captureFailure { throw captureFailure }
@@ -156,6 +196,13 @@ public actor DictationAudioPipeline {
         _ = await recognition.result
         _ = await replayJob?.result
         await waitForArchiveWrite()
+        await finishScopeOnce()
+    }
+
+    /// Successful PCM duration written to the fallback archive. Call after the
+    /// capture feed has drained when deciding whether recovery audio is useful.
+    public func capturedDuration() -> TimeInterval {
+        archivedDuration
     }
 
     private func checkCancellation() throws {
@@ -167,6 +214,20 @@ public actor DictationAudioPipeline {
         if archiveWriteInFlight {
             await withCheckedContinuation { archiveWriteWaiters.append($0) }
         }
+    }
+
+    private func finishScopeOnce() async {
+        if let scopeFinishTask {
+            await scopeFinishTask.value
+            return
+        }
+        guard !scopeFinished else { return }
+        scopeFinished = true
+        guard let finishScope else { return }
+        let task = Task { await finishScope() }
+        scopeFinishTask = task
+        await task.value
+        scopeFinishTask = nil
     }
 
     private static func validate(_ packet: CapturedAudioPacket) throws {
@@ -194,20 +255,36 @@ public protocol DictationRecognitionSession: Sendable {
 public protocol DictationRecognitionModel: Sendable {
     func makeDictationSession(configuration: TranscriptSegmentationConfiguration) async throws -> any DictationRecognitionSession
     func reset() async throws
+    func unload() async
 }
 
-/// Owns a single short-lived, local model cache for consecutive dictations.
-/// Nothing loads at launch; the cache never runs inference between utterances.
+extension DictationRecognitionModel {
+    /// Existing test models only need reset. Native models override this to
+    /// release their Core ML resources as well.
+    public func unload() async { try? await reset() }
+}
+
+@_spi(Validation)
+public enum DictationRecognitionPhase: Sendable, Equatable {
+    case preparingModel
+    case transcribing
+}
+
+/// Owns the shared local model for live dictation and archive replay. Loading
+/// can start before capture; inference runs only for a dictation request.
 @_spi(Validation)
 public actor DictationRecognizer {
-    private let idleRetention: Duration
-    private let loadModel: @Sendable () async throws -> any DictationRecognitionModel
-    private var model: (any DictationRecognitionModel)?
-    private var eviction: Task<Void, Never>?
-    private var recognizing = false
-    private var modelInUse = false
+    /// Keep the prepared model across short work pauses.
+    /// The resident weights are clean model mappings, spend no CPU idle, and
+    /// are released before recording/import or after this bounded five-minute
+    /// window.
+    public static let defaultIdleRetention: Duration = .seconds(300)
 
-    public init(idleRetention: Duration = .seconds(20)) {
+    private let modelCache: DictationModelCache<any DictationRecognitionModel>
+    private var recognizing = false
+    private var scopeLoadFailures: [UUID: any Error] = [:]
+
+    public init(idleRetention: Duration = defaultIdleRetention) {
         self.init(idleRetention: idleRetention, loadModel: { try await ParakeetDictationModel.loadInstalled() })
     }
 
@@ -215,41 +292,63 @@ public actor DictationRecognizer {
         idleRetention: Duration,
         loadModel: @escaping @Sendable () async throws -> any DictationRecognitionModel
     ) {
-        self.idleRetention = idleRetention
-        self.loadModel = loadModel
+        modelCache = DictationModelCache(
+            idleRetention: idleRetention,
+            load: loadModel,
+            unload: { model in await model.unload() }
+        )
     }
 
-    deinit { eviction?.cancel() }
-
-    public func releaseIfIdle() {
-        guard !modelInUse else { return }
-        eviction?.cancel()
-        eviction = nil
-        model = nil
+    /// Starts the one local installed-model flight in the background. This
+    /// entry point never waits for FluidAudio to finish loading weights.
+    public func prepare() async {
+        await modelCache.prewarm()
     }
 
-    func transcribe(
+    /// Observes whether the shared model preparation flight is active.
+    func modelPreparationUpdates() async -> AsyncStream<Bool> {
+        await modelCache.modelPreparationUpdates()
+    }
+
+    public func waitUntilPrepared() async throws {
+        try await modelCache.waitUntilPrepared()
+    }
+
+    public func releaseIfIdle() async {
+        await modelCache.releaseIfIdle()
+    }
+
+    public func finishScope(_ scope: UUID) async {
+        scopeLoadFailures[scope] = nil
+        await modelCache.endScope(scope)
+    }
+
+    @_spi(Validation)
+    public func transcribe(
         _ packets: AsyncStream<CapturedAudioPacket>,
-        configuration: TranscriptSegmentationConfiguration
+        configuration: TranscriptSegmentationConfiguration,
+        scope: UUID? = nil,
+        onPhase: @Sendable (DictationRecognitionPhase) -> Void = { _ in }
     ) async throws -> AudioFileTranscription? {
         try Task.checkCancellation()
         guard !recognizing else { throw STTError.failed("Dictation recognition is already running.") }
         recognizing = true
-        defer {
-            recognizing = false
-            if modelInUse {
-                modelInUse = false
-                if model != nil { scheduleEviction() }
-            }
+        defer { recognizing = false }
+        if let scope {
+            scopeLoadFailures[scope] = nil
         }
 
         var session: (any DictationRecognitionSession)?
+        var lease: DictationModelLease<any DictationRecognitionModel>?
         var rateRun: DictationSampleRateRun?
         var pending: [Float] = []
         var duration: TimeInterval = 0
         var audioOrigin: TimeInterval?
         let windows = ParakeetStreamingSession.dictationWindows
         var samplesUntilWindow = windows.first
+        var didAttemptModelPreparation = false
+        var announcedTranscribing = false
+        var scopeStarted = false
         let audio: AudioFileTranscription
         do {
             for await packet in packets {
@@ -270,7 +369,16 @@ public actor DictationRecognizer {
                 // Avoid loading the model for accidental taps. Once a real
                 // utterance starts, load it in parallel with ongoing capture.
                 if session == nil, DictationAudioPipeline.reachesMinimum(duration) {
-                    session = try await makeSession(configuration: configuration)
+                    didAttemptModelPreparation = true
+                    if let scope, !scopeStarted {
+                        await modelCache.beginScope(scope)
+                        scopeStarted = true
+                    }
+                    let preparedLease = try await acquireModel(onPhase: onPhase)
+                    lease = preparedLease
+                    session = try await makeSession(
+                        configuration: configuration, lease: preparedLease
+                    )
                 }
                 if session != nil, let converted = try await rateRun?.convertBatchIfReady() {
                     pending += converted
@@ -280,6 +388,10 @@ public actor DictationRecognizer {
                 if let session, pending.count >= samplesUntilWindow {
                     let surplus = (pending.count - samplesUntilWindow) % windows.stride
                     samplesUntilWindow = windows.stride - surplus
+                    if !announcedTranscribing {
+                        onPhase(.transcribing)
+                        announcedTranscribing = true
+                    }
                     try await session.append(samples: pending, startTime: audioOrigin ?? 0)
                     pending.removeAll(keepingCapacity: true)
                 }
@@ -293,54 +405,131 @@ public actor DictationRecognizer {
             pending += try await rateRun.flush(finalContext: finalContext)
             // Finish with the unprocessed tail and release the model's right
             // context, even when the key goes up mid-word or on a boundary.
+            if !announcedTranscribing {
+                onPhase(.transcribing)
+                announcedTranscribing = true
+            }
             let final = try await session.finishDictation(appending: pending, startTime: audioOrigin, endTime: duration)
             try Task.checkCancellation()
             audio = AudioFileTranscription(transcript: Transcript(segments: final.segments), duration: duration)
         } catch {
+            let wasCancelled = Task.isCancelled || error is CancellationError
             await session?.cancel()
-            if modelInUse {
-                if Task.isCancelled || error is CancellationError { await resetCachedModel() }
-                else { model = nil }
+            if let lease {
+                if await resetModel(lease) { await modelCache.endUse(lease.id) }
+            } else if !wasCancelled, didAttemptModelPreparation, let scope {
+                // A failed cold load must not be retried immediately by archive
+                // fallback within the same pipeline scope. A later explicit
+                // dictation gets a new scope and can start a fresh flight.
+                scopeLoadFailures[scope] = error
             }
             throw error
         }
-        await resetCachedModel()
+        if let lease { await finishModelUse(lease) }
         try Task.checkCancellation()
         return audio
     }
 
-    private func makeSession(
-        configuration: TranscriptSegmentationConfiguration
-    ) async throws -> any DictationRecognitionSession {
+    @_spi(Validation)
+    public func replayArchive(
+        _ urls: [URL],
+        configuration: TranscriptSegmentationConfiguration,
+        scope: UUID? = nil,
+        onPhase: @Sendable (DictationRecognitionPhase) -> Void = { _ in }
+    ) async throws -> AudioFileTranscription {
         try Task.checkCancellation()
-        modelInUse = true
-        eviction?.cancel()
-        eviction = nil
-        if model == nil { model = try await loadModel() }
-        try Task.checkCancellation()
-        guard let model else { throw STTError.modelNotLoaded }
-        return try await model.makeDictationSession(configuration: configuration)
-    }
+        guard !urls.isEmpty else { throw STTError.invalidAudio }
+        guard !recognizing else { throw STTError.failed("Dictation recognition is already running.") }
+        recognizing = true
+        defer { recognizing = false }
+        if let scope {
+            await modelCache.beginScope(scope)
+            if let failure = scopeLoadFailures[scope] { throw failure }
+        }
 
-    private func resetCachedModel() async {
-        // The worker has stopped using the session before the decoder is
-        // reset. Keep weights only if all utterance state could be cleared.
-        do { try await model?.reset() }
-        catch { model = nil }
-    }
+        var session: (any DictationRecognitionSession)?
+        var lease: DictationModelLease<any DictationRecognitionModel>?
+        var announcedTranscribing = false
+        do {
+            let preparedLease = try await acquireModel(onPhase: onPhase)
+            lease = preparedLease
+            let preparedSession = try await makeSession(
+                configuration: configuration, lease: preparedLease
+            )
+            session = preparedSession
 
-    private func scheduleEviction() {
-        guard idleRetention > .zero else { releaseIfIdle(); return }
-        eviction = Task { [weak self, idleRetention] in
-            do { try await Task.sleep(for: idleRetention) } catch { return }
-            await self?.evictExpiredModel()
+            var reader = AudioFilePCMReader(urls: urls, source: .microphone)
+            while let chunk = try await reader.next() {
+                try Task.checkCancellation()
+                if !chunk.samples.isEmpty {
+                    if !announcedTranscribing {
+                        onPhase(.transcribing)
+                        announcedTranscribing = true
+                    }
+                    try await preparedSession.append(samples: chunk.samples, startTime: chunk.startTime)
+                }
+            }
+            if !announcedTranscribing {
+                onPhase(.transcribing)
+                announcedTranscribing = true
+            }
+            let final = try await preparedSession.finishDictation(
+                appending: [], startTime: 0, endTime: reader.duration
+            )
+            try Task.checkCancellation()
+            let audio = AudioFileTranscription(
+                transcript: Transcript(segments: final.segments),
+                duration: reader.duration
+            )
+            if let lease { await finishModelUse(lease) }
+            lease = nil
+            return audio
+        } catch {
+            await session?.cancel()
+            if let lease { await finishModelUse(lease) }
+            throw error
         }
     }
 
-    private func evictExpiredModel() {
-        guard !Task.isCancelled else { return }
-        releaseIfIdle()
+    private func acquireModel(
+        onPhase: @Sendable (DictationRecognitionPhase) -> Void
+    ) async throws -> DictationModelLease<any DictationRecognitionModel> {
+        try Task.checkCancellation()
+        return try await modelCache.acquire {
+            onPhase(.preparingModel)
+        }
     }
+
+    private func makeSession(
+        configuration: TranscriptSegmentationConfiguration,
+        lease: DictationModelLease<any DictationRecognitionModel>
+    ) async throws -> any DictationRecognitionSession {
+        try Task.checkCancellation()
+        let session = try await lease.model.makeDictationSession(configuration: configuration)
+        try Task.checkCancellation()
+        return session
+    }
+
+    private func finishModelUse(
+        _ lease: DictationModelLease<any DictationRecognitionModel>
+    ) async {
+        // The session has stopped processing before this actor reaches reset.
+        // Keep the shared weights only when all utterance state was cleared.
+        if await resetModel(lease) { await modelCache.endUse(lease.id) }
+    }
+
+    private func resetModel(
+        _ lease: DictationModelLease<any DictationRecognitionModel>
+    ) async -> Bool {
+        do {
+            try await lease.model.reset()
+            return true
+        } catch {
+            await modelCache.invalidate(lease.id)
+            return false
+        }
+    }
+
 }
 
 /// Converter state belongs to one uninterrupted native sample-rate run.

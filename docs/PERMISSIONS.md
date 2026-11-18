@@ -12,7 +12,7 @@ In **Settings → Dictation**, choose **Enable…** to open Accessibility settin
 
 ## Upgrade identity and legacy locations
 
-Distributed builds may retain the bundle identifier and signing identity for upgrades. This source snapshot does not include a signed binary. Changing the identity can make macOS show a permission as enabled while rejecting the new binary.
+The public Beta 2 keeps the bundle identifier but uses an ad-hoc signature. macOS may therefore request capture or Accessibility permission again when upgrading from an earlier development-signed build.
 
 The internal support location is also retained. Prosody prefers `~/Library/Containers/com.openai.clippy/Data/Library/Application Support/Clippy` when that sandbox folder exists, and otherwise uses `~/Library/Application Support/Clippy`. Models live under its `Models` folder and recovery data under `Recovery`. Clean installs use `~/Prosody` for output; upgrades keep the saved folder or an existing `~/Clippy`. The old sandbox output folder, when present, is `~/Library/Containers/com.openai.clippy/Data/Clippy`.
 
@@ -33,4 +33,4 @@ codesign -d -r- dist/Prosody.app
 codesign --verify --deep --strict dist/Prosody.app
 ```
 
-Distribution signing and notarization are separate from capture permissions. This source snapshot does not include a signed installer. See [Build and source terms](../README.md#build-and-source-terms).
+Distribution signing and notarization are separate from capture permissions. See [Build from source](../README.md#build-from-source) and [Releasing Prosody](RELEASING.md).

@@ -7,7 +7,9 @@ import Foundation
 struct ProsodyValidation {
     static func main() async throws {
         if let command = CommandLine.arguments.dropFirst().first,
-           command == "--benchmark-dictation" || command == "--benchmark-nemotron" {
+           command == "--benchmark-dictation" ||
+           command == "--benchmark-dictation-lifecycle" ||
+           command == "--benchmark-nemotron" {
             await runBenchmark(command, arguments: Array(CommandLine.arguments.dropFirst(2)))
             return
         }
@@ -34,6 +36,8 @@ struct ProsodyValidation {
         do {
             if command == "--benchmark-dictation" {
                 try await benchmarkDictation(arguments: arguments)
+            } else if command == "--benchmark-dictation-lifecycle" {
+                try await benchmarkDictationLifecycle(arguments: arguments)
             } else {
                 guard let directory = arguments.first, arguments.count > 1 else {
                     throw BenchmarkError("Usage: ProsodyValidation --benchmark-nemotron <compiled-tier-directory> <audio-file> …")

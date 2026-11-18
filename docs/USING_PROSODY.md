@@ -2,7 +2,17 @@
 
 Prosody opens in the macOS menu bar. Click its icon for the recorder, or Control-click it for quick actions. **Settings** and **Transcripts** open in separate windows. Use **View → Enter Full Screen** or **Control-Command-F** in either window.
 
-This Markdown guide is the current reference for setup, recording, dictation, transcripts, and privacy.
+This Markdown guide is the current reference for setup, recording, dictation, transcripts, and privacy. See [Install](#install) for the Beta 2 disk image and first-launch notes.
+
+## Install
+
+Download `Prosody-1.2.0-beta.2.dmg` and its SHA-256 file from [GitHub Releases](https://github.com/K0g1/Prosody/releases/tag/v1.2.0-beta.2). In Terminal, run:
+
+```sh
+shasum -a 256 -c Prosody-1.2.0-beta.2.dmg.sha256
+```
+
+Open the disk image and drag **Prosody** to **Applications**. This public beta is ad-hoc signed and not notarized. If macOS blocks the first launch, open the Finder context menu for Prosody and choose **Open**, or allow it in **System Settings → Privacy & Security**. Later launches use the normal menu-bar entry.
 
 ## Set up and record
 
@@ -17,13 +27,14 @@ The global recording shortcut is **Option-Command-R** by default. It starts, pau
 
 ## Dictate into another app
 
-Open **Settings → Dictation → Enable…**, allow Accessibility access for Prosody, then return and click **Check Again** if shown. Allow microphone access when prompted.
+Install **Parakeet Unified** in **Settings → Models**. Open **Settings → Dictation → Enable…**, allow Accessibility access for Prosody, then return and click **Check Again** if shown. Allow microphone access when prompted.
 
 Click a text field. Hold **Right Command**, speak, and release it. Press the shortcut again for the next utterance while the previous result is still being prepared or delivered. A small queue preserves release order; if it fills, let an earlier result finish before trying again. Keep the intended field focused.
 
-- **Escape** cancels unfinished dictation. A quick tap or silence creates no output.
-- In **Settings → Dictation**, change **Shortcut**, switch **Activation** from **Hold to talk** to **Press to start / stop**, or choose the waveform-only **Minimal** pop-up.
+- **Preparing speech model…** means the local model is still loading. Press **Escape** to dismiss an unfinished dictation immediately. A quick tap or silence creates no output.
+- In **Settings → Dictation**, change **Shortcut**, switch **Activation** from **Hold to talk** to **Press to start / stop**, or choose the **Minimal** pop-up for a smaller waveform and status.
 - **Standard paste** is the default. Try **Keyboard typing** if the editor rejects paste. If Prosody cannot safely insert into the original destination, use **Copy Text** when offered. To keep the result on the clipboard, turn on **Copy output to clipboard**.
+- **Smart sentence capitalization** is on by default for both insertion methods. It uses the text before the caret when the editor makes that context available. Prosody leaves the recognized casing alone when context is unavailable and does not read secure fields. Saved transcripts keep their original casing.
 - Completed dictations are saved. Open **Transcripts** and turn on **Include Dictation** to see them; the checkbox starts off.
 
 ## Read, play, and export transcripts
@@ -46,7 +57,7 @@ Before recording, open **Labels** in the recorder and select one or more. The fi
 
 ## Appearance, tray, notes, and privacy
 
-- **Settings → Appearance** offers 91 themes in seven groups; Beta 1 adds 55. **Graphite** is the default. **Frosted Glass** follows the system appearance and respects **Reduce Transparency**.
+- **Settings → Appearance** offers 91 themes in seven groups. **Graphite** is the default. **Frosted Glass** follows the system appearance and respects **Reduce Transparency**.
 - **Settings → Tray Elements** controls which optional items appear in the compact recorder. Hiding an item keeps its saved choice. **Show All Controls** restores all optional items.
 - **Settings → General → Launch Prosody at Login** is off by default. Use **Open Login Items…** if macOS needs you to approve it.
 - **Settings → Replacements → Add Replacement** applies literal, case-insensitive whole words or phrases to future transcriptions. Leave **Replace with** blank to remove a match.
@@ -56,12 +67,10 @@ Before recording, open **Labels** in the recorder and select one or more. The fi
 
 ## Recovery, upgrade, and backup
 
-After an interruption, open the recorder. If you see **Unfinished recording**, choose **Recover** to finish from saved checkpoints or **Delete…** to discard it. A completed session folder contains its Markdown and JSON transcript, session metadata, and any notes and retained audio.
+After an interruption, open the recorder. If you see **Unfinished recording**, choose **Recover** to finish from saved checkpoints or **Delete…** to discard it. Captured dictation audio also appears here if both recognition paths fail. An intentional **Escape** cancellation discards the unfinished attempt. A completed session folder contains its Markdown and JSON transcript, session metadata, and any notes and retained audio.
 
 Clean installs use `~/Prosody`; upgrades keep the saved folder or an existing `~/Clippy`. Back up every output folder, including label destinations, with the session folders intact. Prosody retains the internal support location at `~/Library/Application Support/Clippy`, or the previous sandbox location at `~/Library/Containers/com.openai.clippy/Data/Library/Application Support/Clippy` when present. The old sandbox output folder can be `~/Library/Containers/com.openai.clippy/Data/Clippy`. App preferences and Keychain credentials are stored separately by macOS.
 
-Distributed builds may retain the bundle identifier and signing identity for upgrades. This source snapshot does not include a signed binary. After moving or restoring folders, choose them again in **Settings → Output** or in the label editor.
-
-This source snapshot does not include a signed installer or notarized build.
+The public beta keeps the `com.openai.clippy` bundle identifier so existing settings and data can be found. Its ad-hoc signature differs from the earlier Apple Development build, so macOS may ask for Microphone, Screen Recording, or Accessibility permission again. After moving or restoring folders, choose them again in **Settings → Output** or in the label editor.
 
 For help, use the project issue tracker. Include the Prosody version and build, macOS version, and steps to reproduce. Use disposable examples and redact personal data. For vulnerabilities, see the [security policy](../SECURITY.md). The source and assets remain all rights reserved under [LICENSE](../LICENSE).

@@ -45,5 +45,5 @@ For real recording controls with isolated output, use **--demo --show-controls
 pause and resume, then confirm the saved transcript and decode the archive
 when retention is enabled. Try an audio-file import separately.
 
-For a future distributed build, use the reviewed candidate for the final launch and upgrade checks.
+For a distributed build, use the reviewed candidate for the final launch, upgrade, Gatekeeper, and checksum checks.
 Fixture flags and playback helpers are not available in release builds.

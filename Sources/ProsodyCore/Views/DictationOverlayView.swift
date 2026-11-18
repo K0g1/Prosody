@@ -40,13 +40,19 @@ struct DictationOverlayView: View {
         .accessibilityIdentifier("clippy.dictation.overlay")
     }
 
-    private var minimalOverlay: some View {
-        let listening = controller.state == .listening
-        return DictationWaveformView(meter: listening ? controller.meter : .zero, compact: true)
-            .opacity(listening ? 1 : 0.65)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Dictation")
-            .accessibilityValue(controller.message)
+    @ViewBuilder private var minimalOverlay: some View {
+        if controller.state == .listening {
+            DictationWaveformView(meter: controller.meter, compact: true)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Dictation")
+                .accessibilityValue(controller.message)
+        } else {
+            Text(controller.state == .transcribing ? "Transcribing…" : "Preparing…")
+                .font(.caption.weight(.medium))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Dictation")
+                .accessibilityValue(controller.message)
+        }
     }
 
     private var fullOverlay: some View {

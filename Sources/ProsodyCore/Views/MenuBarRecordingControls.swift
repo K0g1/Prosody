@@ -4,11 +4,24 @@ struct MenuBarStatusHeader: View {
     @Environment(\.prosodyPalette) private var palette
     @ObservedObject var model: AppModel
     let showsBrand: Bool
+    @State private var isPreparingSpeechModel = false
 
     private var state: RecordingState { model.recordingState }
 
-    private var title: String {
+    private var showsSpeechModelPreparation: Bool {
+        guard isPreparingSpeechModel else { return false }
         switch state {
+        case .idle, .completed:
+            return true
+        case .preparing, .recording, .paused, .stopping, .finalizingTranscript,
+             .diarizing, .generatingNotes, .failed:
+            return false
+        }
+    }
+
+    private var title: String {
+        if showsSpeechModelPreparation { return "Preparing speech model…" }
+        return switch state {
         case .idle, .completed: model.dictation.isActive ? "Dictation in progress" : "Ready"
         default: state.statusTitle
         }
@@ -29,17 +42,28 @@ struct MenuBarStatusHeader: View {
                 Spacer(minLength: 4)
             }
             HStack(spacing: 6) {
-                Circle()
-                    .fill(indicator)
-                    .frame(width: 6, height: 6)
-                    .accessibilityHidden(true)
+                if showsSpeechModelPreparation {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .controlSize(.small)
+                        .frame(width: 28)
+                        .tint(palette.accent)
+                        .accessibilityLabel("Preparing speech model…")
+                        .accessibilityIdentifier("clippy.speech-model-preparation")
+                } else {
+                    Circle()
+                        .fill(indicator)
+                        .frame(width: 6, height: 6)
+                        .accessibilityHidden(true)
+                }
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .accessibilityLabel("Status: \(title)")
             }
             .foregroundStyle(palette.text)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Status: \(title)")
+            .accessibilityElement(children: .contain)
 
             if !showsBrand { Spacer(minLength: 4) }
 
@@ -70,6 +94,19 @@ struct MenuBarStatusHeader: View {
             }
         }
         .frame(minHeight: 26)
+        .task {
+            isPreparingSpeechModel = false
+            let updates = await model.dictation.modelPreparationUpdates()
+            for await isPreparing in updates {
+                guard !Task.isCancelled else { return }
+                isPreparingSpeechModel = isPreparing
+            }
+            guard !Task.isCancelled else { return }
+            isPreparingSpeechModel = false
+        }
+        .onDisappear {
+            isPreparingSpeechModel = false
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(state.isRecording ? "clippy.recording.header" : "clippy.menu.header")
     }

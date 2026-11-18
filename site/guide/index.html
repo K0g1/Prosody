@@ -51,7 +51,7 @@
 
       <article class="guide-handbook">
         <header class="guide-hero">
-          <p class="guide-eyebrow">Beta 1 · macOS 15 or later · Apple silicon</p>
+          <p class="guide-eyebrow">Beta 2 · macOS 15 or later · Apple silicon</p>
           <h1>Prosody handbook</h1>
           <p class="guide-lede">Record system audio or your microphone, transcribe on your Mac, dictate into the app you are already using, and keep searchable Markdown transcripts.</p>
           <p class="guide-note">Press <kbd>⌘F</kbd> in your browser to find a feature or setting on this page. Try “Include Dictation,” “primary label,” or “Accessibility.”</p>
@@ -86,11 +86,11 @@
 
         <section class="guide-section" id="install" aria-labelledby="install-title">
           <h2 id="install-title">Build and source</h2>
-          <p>Prosody requires macOS 15 or later and Apple silicon. This source snapshot does not include a signed installer, notarized build, or release assets.</p>
-          <h3 id="install-steps">Build from source</h3>
-          <p>See the repository README for the current build and source terms. Distribution identity and publication are handled outside this snapshot.</p>
+          <p>Prosody requires macOS 15 or later and Apple silicon. Download the Beta 2 disk image and checksum from <a href="https://github.com/K0g1/Prosody/releases/tag/v1.2.0-beta.2">GitHub Releases</a>.</p>
+          <h3 id="install-steps">Install</h3>
+          <ol class="guide-steps"><li>Verify the checksum with <code>shasum -a 256 -c Prosody-1.2.0-beta.2.dmg.sha256</code>.</li><li>Open the disk image and drag <strong>Prosody</strong> to <strong>Applications</strong>.</li><li>If macOS blocks the first launch, choose <strong>Open</strong> from the Finder context menu or allow Prosody in <strong>System Settings → Privacy &amp; Security</strong>.</li></ol>
           <h3 id="upgrade">Upgrade notes</h3>
-          <p>Distributed builds may retain the bundle identifier and signing identity for upgrades. This source snapshot does not include a signed binary.</p>
+          <p>The public beta keeps the `com.openai.clippy` bundle identifier so existing data is found. Its ad-hoc signature differs from earlier privately signed builds, so macOS may request capture and Accessibility permission again.</p>
         </section>
 
         <section class="guide-section" id="setup" aria-labelledby="setup-title">
@@ -266,6 +266,7 @@
 
           <h3 id="dictation-setup">Set up dictation</h3>
           <ol class="guide-steps">
+            <li>Install <strong>Parakeet Unified</strong> in <strong>Settings</strong> → <strong>Models</strong>.</li>
             <li>Open <strong>Settings</strong> → <strong>Dictation</strong>.</li>
             <li>Choose <strong>Enable…</strong> for Accessibility, turn on the app in System Settings, then return and choose <strong>Check Again</strong>.</li>
             <li>Confirm that <strong>Microphone</strong> access is enabled in <strong>System Settings</strong> → <strong>Privacy &amp; Security</strong>.</li>
@@ -281,8 +282,9 @@
               <tbody>
                 <tr><td><strong>Shortcut</strong></td><td><strong>Right Command</strong> (default), <strong>Right Option</strong>, or <strong>Control + Option + Space</strong></td></tr>
                 <tr><td><strong>Activation</strong></td><td><strong>Hold to talk</strong> (default) or <strong>Press to start / stop</strong></td></tr>
-                <tr><td><strong>Pop-up appearance</strong></td><td><strong>Standard</strong> (default) or <strong>Minimal</strong>, which shows only the waveform</td></tr>
+                <tr><td><strong>Pop-up appearance</strong></td><td><strong>Standard</strong> (default) or <strong>Minimal</strong>, with a smaller waveform and status</td></tr>
                 <tr><td><strong>Text insertion</strong></td><td><strong>Standard paste</strong> (default) or <strong>Keyboard typing</strong></td></tr>
+                <tr><td><strong>Smart sentence capitalization</strong></td><td>On by default. Uses caret context when the editor makes it available.</td></tr>
                 <tr><td><strong>Copy output to clipboard</strong></td><td>Off by default</td></tr>
               </tbody>
             </table>
@@ -297,10 +299,12 @@
             <li><strong>Standard paste</strong> sends Command-V after the shortcut modifiers are released. Prosody checks that the original destination is still safe. Keep the intended field focused; switching apps, fields, or moving the caret can prevent insertion. The app can account for a caret move caused by its own earlier insertion when the editor provides enough information.</li>
             <li>With <strong>Copy output to clipboard</strong> off, Standard paste restores the prior clipboard if it is still unchanged. Turn the setting on to keep the dictated text on the clipboard.</li>
             <li><strong>Keyboard typing</strong> is a compatibility mode for editors that block paste. It types the text in chunks and checks that the destination is still current.</li>
+            <li>Smart sentence capitalization works with both insertion methods. Prosody leaves the recognized casing alone if the editor does not provide enough caret context, and does not read secure fields.</li>
             <li>Delivered and copied dictation text gets one trailing space. The transcript saved in Transcripts stays clean.</li>
             <li>If Prosody cannot safely insert the text, use <strong>Copy Text</strong> when the result panel appears, then paste into the field yourself.</li>
             <li>Prosody does not retry a paste after it has already been dispatched. Secure input, remote desktops, and custom editors can still reject the event.</li>
-            <li>Press <strong>Escape</strong> to discard unfinished dictation. Text already being delivered is not undone.</li>
+            <li><strong>Preparing speech model…</strong> means the local model is still loading. Press <strong>Escape</strong> to dismiss unfinished dictation immediately. Text already being delivered is not undone.</li>
+            <li>If recognition fails and usable audio was captured, use <strong>Recover</strong> in the recorder to try again from the saved audio.</li>
             <li>A very short tap or a dictation with no recognized text creates no output and returns to idle.</li>
           </ul>
           <p>Completed dictations are saved in <strong>Transcripts</strong>. Turn on <strong>Include Dictation</strong> in the sidebar to see them.</p>
@@ -395,7 +399,7 @@
           <p class="guide-kicker">Look and feel</p>
           <h2 id="appearance-title">Appearance</h2>
           <p>Open <strong>Settings</strong> → <strong>Appearance</strong>. Themes apply to the recorder, Settings, Transcripts, sheets, popovers, and dictation overlay. The menu bar and Dock icons stay monochrome. <strong>Graphite</strong> is the default.</p>
-          <p>Beta 1 adds 55 themes for a total of 91, across seven groups. In <strong>Appearance</strong>, click a swatch to apply it.</p>
+          <p>Prosody includes 91 themes across seven groups. In <strong>Appearance</strong>, click a swatch to apply it.</p>
           <div class="guide-grid guide-grid-three">
             <div class="guide-card"><h3>System &amp; Glass</h3><p>Frosted Glass, Smoked Glass, and Sea Glass. Frosted Glass follows the system light or dark appearance.</p></div>
             <div class="guide-card"><h3>Essentials</h3><p>Graphite, Pearl, Linen, Daybreak, Cloud, Chalk, Canvas, Slate, Stone, and Fog.</p></div>
@@ -579,7 +583,7 @@
             <p>Choose <strong>Recover</strong> to finish it or <strong>Delete…</strong> to discard it. Recovery is designed to preserve checkpoints after an unexpected stop.</p>
 
             <h3>The app will not launch.</h3>
-            <p>If a distributed build is available, verify its source and checksum. This source snapshot does not include a signed installer.</p>
+            <p>Verify the DMG against the SHA-256 file attached to the release. This public beta is ad-hoc signed and not notarized, so macOS may require approval in <strong>System Settings → Privacy &amp; Security</strong>.</p>
           </div>
         </section>
 
@@ -589,7 +593,7 @@
           <p>Report ordinary bugs or request features in the project issue tracker. Include the version and build from <strong>About Prosody</strong>, your macOS version, the steps to reproduce the problem, and the error text. Use a sample transcript and remove credentials and personal content before posting.</p>
           <p>For a suspected vulnerability, use the project security page to find the private reporting instructions.</p>
           <h3 id="source-terms">Source and terms</h3>
-          <p>Prosody’s source and assets are <strong>all rights reserved</strong>. This repository is the sanitized public source snapshot and does not grant an open-source license.</p>
+          <p>Prosody’s source and assets are <strong>all rights reserved</strong> and the public release does not grant an open-source license.</p>
           <p class="guide-back"><a href="#main-content">Back to the top</a></p>
         </section>
       </article>

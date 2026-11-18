@@ -806,6 +806,7 @@ public final class AppModel: ObservableObject {
             try await engine.download(model: descriptor, progress: progress)
             lastNotice = "\(descriptor.displayName) is ready"
             await refreshModelInventory()
+            if canBrowseSessions, !demoMode { dictation.prewarmRecognition() }
         } catch {
             userFacingError = UserFacingError(title: "Model download failed", message: error.localizedDescription)
         }
@@ -1544,6 +1545,12 @@ public final class AppModel: ObservableObject {
 
     private func refreshRecoveryInventory() async {
         recoverableSessions = (try? await recoveryStore.recoverableSessions()) ?? []
+    }
+
+    func adoptDictationRecovery(_ session: RecordingSession, archive: AudioArchiveWriter) async throws -> Bool {
+        let adopted = try await recoveryStore.adoptFailedDictation(session, archive: archive)
+        if adopted { await refreshRecoveryInventory() }
+        return adopted
     }
 
     private func finishRecovery(_ manifest: RecoveryManifest) async {

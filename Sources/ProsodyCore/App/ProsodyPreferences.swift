@@ -27,6 +27,7 @@ public final class ProsodyPreferences: ObservableObject {
     @Published public var dictationActivation: DictationActivation { didSet { persist() } }
     @Published public var dictationOverlayAppearance: DictationOverlayAppearance { didSet { persist() } }
     @Published public var copyDictationToClipboard: Bool { didSet { persist() } }
+    @Published public var smartDictationCapitalization: Bool { didSet { persist() } }
     @Published public var wordReplacements: [WordReplacement] { didSet { persist() } }
     @Published public var captureMode: CaptureMode { didSet { persist() } }
     @Published public var sttEngineID: STTEngineID { didSet { persist() } }
@@ -76,6 +77,7 @@ public final class ProsodyPreferences: ObservableObject {
     private enum Key {
         static let hiddenMainScreenSections = "preferences.hiddenMainScreenSections"
         static let dictationOverlayAppearance = "preferences.dictationOverlayAppearance"
+        static let smartDictationCapitalization = "preferences.smartDictationCapitalization"
         static let captureMode = "preferences.captureMode"
         static let sttEngine = "preferences.sttEngine"
         static let sttModel = "preferences.sttModel"
@@ -112,6 +114,7 @@ public final class ProsodyPreferences: ObservableObject {
         dictationActivation = DictationActivation(rawValue: defaults.string(forKey: "preferences.dictationActivation") ?? "") ?? .hold
         dictationOverlayAppearance = DictationOverlayAppearance(rawValue: defaults.string(forKey: Key.dictationOverlayAppearance) ?? "") ?? .standard
         copyDictationToClipboard = defaults.bool(forKey: "preferences.copyDictationToClipboard")
+        smartDictationCapitalization = defaults.object(forKey: Key.smartDictationCapitalization) as? Bool ?? true
         wordReplacements = defaults.data(forKey: "preferences.wordReplacements").flatMap { try? JSONDecoder().decode([WordReplacement].self, from: $0) } ?? []
         recordingLabels = (defaults.data(forKey: "preferences.recordingLabels").flatMap { try? JSONDecoder().decode([RecordingLabel].self, from: $0) }) ?? []
         selectedRecordingLabelIDs = (defaults.stringArray(forKey: "preferences.selectedRecordingLabels") ?? []).compactMap(UUID.init(uuidString:))
@@ -151,6 +154,7 @@ public final class ProsodyPreferences: ObservableObject {
         defaults.set(dictationActivation.rawValue, forKey: "preferences.dictationActivation")
         defaults.set(dictationOverlayAppearance.rawValue, forKey: Key.dictationOverlayAppearance)
         defaults.set(copyDictationToClipboard, forKey: "preferences.copyDictationToClipboard")
+        defaults.set(smartDictationCapitalization, forKey: Key.smartDictationCapitalization)
         defaults.set(try? JSONEncoder().encode(wordReplacements), forKey: "preferences.wordReplacements")
         defaults.set(try? JSONEncoder().encode(recordingLabels), forKey: "preferences.recordingLabels")
         defaults.set(selectedRecordingLabelIDs.map(\.uuidString), forKey: "preferences.selectedRecordingLabels")

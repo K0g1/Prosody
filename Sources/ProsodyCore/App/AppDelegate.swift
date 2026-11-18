@@ -15,6 +15,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let requestPermissions = ProcessInfo.processInfo.arguments.contains("--request-permissions")
         NSApp.setActivationPolicy(showsDebugControls || requestPermissions ? .regular : .accessory)
         AppWindowController.shared.install(debugControlsEnabled: showsDebugControls)
+        // The controller checks existing Accessibility and microphone grants,
+        // demo/fixture mode, and recognition idleness before starting the
+        // installed-only model flight. This call never waits for Core ML.
+        AppModel.shared.dictation.prewarmRecognition()
         if showsDebugControls {
             AppWindowController.shared.showDebugRecorder()
         }

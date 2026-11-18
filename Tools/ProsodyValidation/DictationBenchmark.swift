@@ -35,7 +35,7 @@ extension ProsodyValidation {
     }
 
     private static func benchmarkLive(options: DictationBenchmarkOptions, root: URL) async throws -> [[String]] {
-        let retention: Duration = options.noCache ? .zero : .seconds(20)
+        let retention: Duration = options.noCache ? .zero : DictationRecognizer.defaultIdleRetention
         let recognizer = DictationRecognizer(idleRetention: retention)
         var previousModelUse: ContinuousClock.Instant?
         var transcripts: [[String]] = []
@@ -156,22 +156,50 @@ extension ProsodyValidation {
         let framesPerChunk = Int(packets[0].sampleRate * AppConstants.archiveSegmentSeconds)
         let expectedChunks = (frames + framesPerChunk - 1) / framesPerChunk
         let writer = AudioArchiveWriter(directoryURL: root)
-        let engine = TimedDictationEngine()
-        // Inject only the live recognition failure. Use the production
-        // pipeline, AAC writer and Unified file transcriber for recovery.
+        // Keep the scoped manager cached between the completed live pass and
+        // the injected replay failure. The scope pin prevents eviction while
+        // the same pipeline owns the utterance.
+        let recognizer = DictationRecognizer()
+        let configuration = TranscriptSegmentationConfiguration()
+        let scope = UUID()
+        let livePhases = BenchmarkPhaseRecorder()
+        let replayPhases = BenchmarkPhaseRecorder()
+        let timing = BenchmarkFallbackTiming()
+        // Run the real live recognizer to completion, then inject the failure.
+        // Recovery uses the same scoped recognizer and production pipeline, so
+        // it must reuse the live manager rather than load a second one.
         let pipeline = DictationAudioPipeline(archive: writer, bufferCapacity: packets.count, recognize: { input in
-            for await _ in input { try Task.checkCancellation() }
-            throw BenchmarkError("Injected live recognition failure")
+            let start = DispatchTime.now().uptimeNanoseconds
+            let live = try await recognizer.transcribe(
+                input, configuration: configuration, scope: scope
+            ) { phase in
+                livePhases.record(phase)
+            }
+            timing.recordLive(
+                start: start,
+                end: DispatchTime.now().uptimeNanoseconds,
+                text: live.map { benchmarkText($0.transcript) } ?? ""
+            )
+            throw BenchmarkError("Injected live recognition failure after completed live recognition")
         }, replay: { urls in
             guard urls.count == expectedChunks else {
                 throw BenchmarkError("\(fixture.name): expected \(expectedChunks) fallback archive chunks; got \(urls.count).")
             }
-            return try await AudioFileTranscriber(engine: engine).transcribe(files: [.microphone: urls])
+            let start = DispatchTime.now().uptimeNanoseconds
+            let audio = try await recognizer.replayArchive(
+                urls, configuration: configuration, scope: scope
+            ) { phase in
+                replayPhases.record(phase)
+            }
+            timing.recordReplay(start: start, end: DispatchTime.now().uptimeNanoseconds)
+            return audio
+        }, finishScope: {
+            await recognizer.finishScope(scope)
         })
         print("Fixture: \(fixture.name) | forcing recognition failure (\(expectedChunks) AAC chunks expected)")
         do {
-            // There is no inference to pace. Feed the complete archive before
-            // timing fallback finalization so even a long check is practical.
+            // Feed the archive without pacing. The real live recognizer consumes
+            // the same stream, then the injected failure triggers scoped replay.
             for packet in packets { try await pipeline.append(packet) }
             let release = ContinuousClock.now
             guard let outcome = try await pipeline.finish(), outcome.usedArchive else {
@@ -179,15 +207,27 @@ extension ProsodyValidation {
             }
             let resultText = benchmarkText(outcome.audio.transcript)
             let ready = ContinuousClock.now
-            let load = await engine.prepareTime
-            print(String(format: "  Fallback | ready %.1f | model load %.1f | %d words",
-                         milliseconds(release.duration(to: ready)), milliseconds(load), benchmarkWords(resultText).count))
+            let snapshot = timing.snapshot()
+            let liveLoads = livePhases.count(.preparingModel)
+            let replayLoads = replayPhases.count(.preparingModel)
+            guard liveLoads == 1, replayLoads == 0 else {
+                throw BenchmarkError("\(fixture.name): expected one live model load and zero replay loads; observed live=\(liveLoads), replay=\(replayLoads).")
+            }
+            print(String(format: "  Fallback | ready %.1f | live total %.1f | archive replay %.1f | live prepare %.1f | live loads %d | replay loads %d | %d words",
+                         milliseconds(release.duration(to: ready)), snapshot.liveMilliseconds,
+                         snapshot.replayMilliseconds, livePhases.phaseDuration(from: .preparingModel, to: .transcribing),
+                         liveLoads, replayLoads, benchmarkWords(resultText).count))
+            if options.showText, !snapshot.liveText.isEmpty {
+                print("  Fallback live text: \(snapshot.liveText)")
+            }
             if options.showText { print("  Fallback text: \(resultText)") }
             try checkBenchmarkQuality(fixture, audio: outcome.audio, text: resultText, duration: duration,
                                       archived: true, maxWER: options.maxWER, context: "\(fixture.name), forced fallback")
+            await recognizer.releaseIfIdle()
             try await writer.discard()
         } catch {
             await pipeline.cancel()
+            await recognizer.releaseIfIdle()
             throw error
         }
     }
@@ -444,4 +484,74 @@ private actor TimedDictationEngine: STTEngine {
     }
 
     func unload() async { await engine.unload() }
+}
+
+private final class BenchmarkPhaseRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private let start = DispatchTime.now().uptimeNanoseconds
+    private var values: [(phase: DictationRecognitionPhase, milliseconds: Double)] = []
+
+    func record(_ phase: DictationRecognitionPhase) {
+        let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        lock.lock()
+        values.append((phase, milliseconds))
+        lock.unlock()
+    }
+
+    func count(_ phase: DictationRecognitionPhase) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return values.filter { $0.phase == phase }.count
+    }
+
+    func phaseDuration(from first: DictationRecognitionPhase, to second: DictationRecognitionPhase) -> Double {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let start = values.first(where: { $0.phase == first })?.milliseconds,
+              let end = values.first(where: { $0.phase == second })?.milliseconds
+        else { return 0 }
+        return max(0, end - start)
+    }
+}
+
+private final class BenchmarkFallbackTiming: @unchecked Sendable {
+    struct Snapshot {
+        let liveMilliseconds: Double
+        let replayMilliseconds: Double
+        let liveText: String
+    }
+
+    private let lock = NSLock()
+    private var liveStart: UInt64?
+    private var liveEnd: UInt64?
+    private var replayStart: UInt64?
+    private var replayEnd: UInt64?
+    private var liveText = ""
+
+    func recordLive(start: UInt64, end: UInt64, text: String) {
+        lock.lock()
+        liveStart = start
+        liveEnd = end
+        liveText = text
+        lock.unlock()
+    }
+
+    func recordReplay(start: UInt64, end: UInt64) {
+        lock.lock()
+        replayStart = start
+        replayEnd = end
+        lock.unlock()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        let live = liveStart.flatMap { start in liveEnd.map { max(0, $0 - start) } } ?? 0
+        let replay = replayStart.flatMap { start in replayEnd.map { max(0, $0 - start) } } ?? 0
+        return Snapshot(
+            liveMilliseconds: Double(live) / 1_000_000,
+            replayMilliseconds: Double(replay) / 1_000_000,
+            liveText: liveText
+        )
+    }
 }

@@ -35,7 +35,7 @@ The menu-bar recorder is the normal recording surface. Settings and Transcripts 
 
 `RecordingLabelsStudioView` edits labels inside Settings. `RecordingLabelDraftStore` keeps unsaved drafts and folder bookmarks across page recreation and section changes. A label has a stable identifier, name, color, output folder, naming pattern, and date format. The first selected label is primary and supplies the recording title pattern and destination. Labels are snapshotted into saved sessions, so renaming or deleting a label does not rewrite existing files or remove its identity from saved recordings.
 
-`ProsodyTheme` preserves the existing persisted theme identifiers while exposing the Prosody catalog. It contains 91 themes in seven groups; Beta 1 adds 55. The same semantic palette feeds the recorder, Settings, Transcripts, sheets, popovers, and dictation overlay. Frosted Glass is the adaptive system-appearance theme. Reduce Transparency selects an opaque fallback, and Reduce Motion disables waveform interpolation. The menu-bar and Dock icons remain monochrome.
+`ProsodyTheme` preserves the existing persisted theme identifiers while exposing the Prosody catalog. It contains 91 themes in seven groups. The same semantic palette feeds the recorder, Settings, Transcripts, sheets, popovers, and dictation overlay. Frosted Glass is the adaptive system-appearance theme. Reduce Transparency selects an opaque fallback, and Reduce Motion disables waveform interpolation. The menu-bar and Dock icons remain monochrome.
 
 ## Transcript library and reader
 
@@ -87,6 +87,6 @@ The template notes provider creates a deterministic Offline Outline locally. `Op
 
 ## Packaging and release boundary
 
-`Resources/Info.plist` keeps `ClippyReleaseLabel` as a compatibility key and defines the display name, numeric version and build, minimum OS, and capture usage descriptions. The source keeps the bundle identifier for upgrade compatibility. Release packaging and signing are outside this source snapshot. The build script stages the SwiftPM executable, resources, and third-party notices into `dist/Prosody.app` before signing. New commands use `PROSODY_*` environment names; `CLIPPY_*` remains a compatibility alias.
+`Resources/Info.plist` keeps `ClippyReleaseLabel` as a compatibility key and defines the display name, numeric version and build, minimum OS, and capture usage descriptions. The source keeps the bundle identifier for upgrade compatibility. The build script stages the SwiftPM executable, resources, and third-party notices into `dist/Prosody.app` before signing. New commands use `PROSODY_*` environment names; `CLIPPY_*` remains a compatibility alias.
 
-A release packager can verify the staged app, the mounted image, the absence of bundled model weights, and the SHA-256 checksum. A valid signature proves bundle integrity; it does not establish distribution acceptance. Release packaging and publication are handled outside this source snapshot.
+The release packager verifies the staged app, mounted image, absence of bundled model weights, and SHA-256 checksum. A valid signature proves bundle integrity; it does not establish notarization or Gatekeeper acceptance. See [Releasing Prosody](RELEASING.md).

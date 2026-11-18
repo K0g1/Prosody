@@ -104,6 +104,13 @@ extension AppModel {
         }
     }
 
+    func preserveFailedDictation(duration: TimeInterval, archive: AudioArchiveWriter) async throws -> Bool {
+        var session = makeLibrarySession(title: "Dictation \(Date.now.formatted(date: .abbreviated, time: .shortened))", kind: "dictation")
+        session.duration = duration
+        session.status = "recoverable"
+        return try await adoptDictationRecovery(session, archive: archive)
+    }
+
     private func makeLibrarySession(title: String, kind: String) -> RecordingSession {
         var session = RecordingSession(title: title, captureMode: .microphone,
             sttEngineID: preferences.sttEngineID, sttModelID: preferences.sttModelID, speakerMode: .off,

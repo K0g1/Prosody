@@ -74,6 +74,29 @@ public actor RecoveryStore {
         return manifest
     }
 
+    /// Adopt the closed dictation archive after recognition fails. This has
+    /// no extra write or copy on the successful dictation path. The manifest
+    /// is ready before moving audio, so a relaunch can find the adopted files.
+    func adoptFailedDictation(_ session: RecordingSession, archive: AudioArchiveWriter) async throws -> Bool {
+        let chunks = try await archive.finish()
+        guard chunks.contains(where: AudioArchiveMerger.isSupportedAudioFile) else { return false }
+
+        let manager = FileManager.default
+        let directory = directoryURL(for: session.id)
+        let audioDirectory = directory.appendingPathComponent("audio", isDirectory: true)
+        guard !manager.fileExists(atPath: directory.path) else { throw CocoaError(.fileWriteFileExists) }
+        do {
+            try update(RecoveryManifest(session: session, state: .recoverable, duration: session.duration))
+            try manager.moveItem(at: archive.directoryURL, to: audioDirectory)
+        } catch {
+            // Leave the original directory alone. If the move made any
+            // recovery audio available, do not remove its manifest either.
+            if !manager.fileExists(atPath: audioDirectory.path) { try? remove(id: session.id) }
+            throw error
+        }
+        return true
+    }
+
     public func update(_ manifest: RecoveryManifest) throws {
         let directory = directoryURL(for: manifest.id)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

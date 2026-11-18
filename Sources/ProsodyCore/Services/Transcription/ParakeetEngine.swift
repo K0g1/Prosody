@@ -170,17 +170,28 @@ public actor ParakeetEngine: STTEngine {
 struct ParakeetDictationModel: DictationRecognitionModel {
     private let manager: StreamingUnifiedAsrManager
 
+    static let missingModelMessage =
+        "Install Parakeet Unified in Settings → Models before using dictation."
+
     static func loadInstalled() async throws -> Self {
         let registry = STTRegistry()
         let inventory = STTModelManager()
         guard let model = await registry.model(id: "parakeet-unified", for: .parakeet),
-              await inventory.isInstalled(model) else { throw STTError.modelNotLoaded }
+              await inventory.isInstalled(model) else {
+            throw ParakeetEngineError.modelUnavailable(missingModelMessage)
+        }
         let directory = await inventory.modelURL(for: model)
         try Task.checkCancellation()
         let manager = StreamingUnifiedAsrManager()
         // Never enter a downloader while capture is feeding the live queue,
         // even if the cache was deleted after the inventory check.
-        try await manager.loadModels(from: directory)
+        do {
+            try await manager.loadModels(from: directory)
+        } catch {
+            throw ParakeetEngineError.modelUnavailable(
+                "\(missingModelMessage) The installed files could not be loaded: \(error.localizedDescription)"
+            )
+        }
         return Self(manager: manager)
     }
 
@@ -190,6 +201,8 @@ struct ParakeetDictationModel: DictationRecognitionModel {
     }
 
     func reset() async throws { try await manager.reset() }
+
+    func unload() async { await manager.cleanup() }
 }
 
 public actor ParakeetStreamingSession: STTSession {

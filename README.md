@@ -2,13 +2,17 @@
 
 Prosody is a macOS menu bar app for recording and dictation. Capture system audio, your microphone, or both; save searchable Markdown transcripts; or speak into the text field where you are working. Speech recognition runs on your Mac with Parakeet Unified.
 
-**Source snapshot · macOS 15 or later · Apple silicon**
+**Beta 2 · macOS 15 or later · Apple silicon**
 
-[Handbook](docs/USING_PROSODY.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+[Download Beta 2](https://github.com/K0g1/Prosody/releases/tag/v1.2.0-beta.2) · [Website](https://k0g1.github.io/Prosody/) · [Handbook](https://k0g1.github.io/Prosody/guide/) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
-## Source snapshot
+## Install
 
-This snapshot contains source and documentation only. It does not include a signed installer or release assets. See [Build and source terms](#build-and-source-terms).
+Prosody 1.2.0 Beta 2 is a public prerelease for Apple silicon Macs running macOS 15 or later. Download `Prosody-1.2.0-beta.2.dmg` and its SHA-256 file from the [Beta 2 release](https://github.com/K0g1/Prosody/releases/tag/v1.2.0-beta.2). Verify the checksum, open the disk image, and drag Prosody to Applications.
+
+This public beta is ad-hoc signed and is not notarized. On first launch, macOS may require **Open** from the Finder context menu or approval in **System Settings → Privacy & Security**. The public release contains no personal signing identity. The app downloads the speech model separately after installation.
+
+See the [Beta 2 release notes](docs/releases/v1.2.0-beta.2.md) for changes, compatibility notes, and known limitations.
 
 ## Record or dictate
 
@@ -24,7 +28,7 @@ See [Using Prosody](docs/USING_PROSODY.md) for click paths, keyboard shortcuts, 
 
 Audio capture, speech recognition, and the default **Offline Outline** notes run on your Mac. **Local-only mode** is on by default and restricts notes requests to local endpoints. If you turn it off and configure a remote notes provider, that provider receives transcript text and notes context when it generates notes. Transcripts and optional retained audio are saved in your output folders. Provider credentials stay in the macOS Keychain.
 
-## Build and source terms
+## Build from source
 
 With Swift 6 and Xcode selected, run from a local checkout:
 

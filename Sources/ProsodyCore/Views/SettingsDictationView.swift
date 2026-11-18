@@ -29,7 +29,7 @@ struct DictationSettingsView: GroupedSettingsSearchPage {
             .accessibilityIdentifier(entry.id)
         },
         .init("clippy.settings.dictation.appearance", "Pop-up appearance",
-              help: "Minimal shows only the waveform during dictation.",
+              help: "Minimal shows a smaller waveform and a brief status.",
               keywords: ["popup", "overlay", "HUD", "waveform"]) { pane, entry in
             Picker(entry.title, selection: pane.$preferences.dictationOverlayAppearance) {
                 ForEach(DictationOverlayAppearance.allCases) { Text($0.rawValue).tag($0) }
@@ -48,6 +48,13 @@ struct DictationSettingsView: GroupedSettingsSearchPage {
             }
             .labelsHidden().pickerStyle(.menu).frame(width: 170)
             .accessibilityIdentifier(entry.id)
+        },
+        .init("clippy.settings.dictation.smart-capitalization", "Smart sentence capitalization",
+              keywords: ["capitalization", "sentence case", "caret context", "punctuation"],
+              context: "Best effort in apps that expose caret context.") { pane, entry in
+            Toggle(entry.title, isOn: pane.$preferences.smartDictationCapitalization)
+                .labelsHidden().toggleStyle(.switch)
+                .accessibilityIdentifier(entry.id)
         },
         .init("clippy.settings.dictation.clipboard", "Copy output to clipboard",
               keywords: ["copy dictation text"]) { pane, entry in

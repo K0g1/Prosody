@@ -31,7 +31,7 @@ security find-identity -p codesigning -v
 PROSODY_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID)" ./script/build_and_run.sh --stage
 ```
 
-Use a consistent local Apple Development identity for development. This source snapshot does not include a signed binary. Ad-hoc signing is a local-development fallback and can require regranting permissions after a rebuild. See [permission troubleshooting](PERMISSIONS.md).
+Use a consistent local Apple Development identity for development. Public releases use a project-safe ad-hoc or Developer ID signature and never publish a certificate that contains a personal name. Ad-hoc signing can require regranting permissions after a rebuild. See [permission troubleshooting](PERMISSIONS.md).
 
 ## Demo mode and testing
 

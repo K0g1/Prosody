@@ -193,6 +193,8 @@ private struct DictationStreamingFixture {
         try await second.append(packet(8_000))
         let fallback = try await second.finish()
         precondition(fallback?.usedArchive == true, "Two sessions accessed the same decoder.")
+        let activeCounts = await probe.counts
+        precondition(activeCounts.unloads == 0, "releaseIfIdle evicted an active dictation scope.")
 
         await first.cancel()
         try await expectCancelled { _ = try await result.value }
@@ -202,7 +204,10 @@ private struct DictationStreamingFixture {
         precondition(again?.usedArchive == false)
         let warmCounts = await probe.counts
         let trace = await probe.lastTrace
-        precondition(warmCounts == .init(loads: 1, starts: 3, resets: 3, cancels: 1))
+        // releaseIfIdle was requested while finalization was in flight. The
+        // active scope defers exactly one unload until cancellation; the next
+        // successful utterance therefore reloads the model.
+        precondition(warmCounts == .init(loads: 2, starts: 3, resets: 3, cancels: 1, unloads: 1))
         precondition(trace?.configuration == config && trace?.pcm.count == 8_000 + 1_280)
 
         await probe.failNextReset()
@@ -210,11 +215,13 @@ private struct DictationStreamingFixture {
         precondition(completed?.usedArchive == false, "Reset failure discarded a completed transcript.")
         _ = try await run("fresh after reset failure", recognizer, [packet(8_000)])
         let reloaded = await probe.loads
-        precondition(reloaded == 2)
+        let unloadsAfterResetFailure = await probe.unloads
+        precondition(reloaded == 3 && unloadsAfterResetFailure == 2)
         await recognizer.releaseIfIdle()
         _ = try await run("fresh after manual release", recognizer, [packet(8_000)])
         let released = await probe.loads
-        precondition(released == 3)
+        let unloadsAfterRelease = await probe.unloads
+        precondition(released == 4 && unloadsAfterRelease == 3)
 
         let uncachedProbe = DictationModelProbe()
         let uncached = DictationRecognizer(idleRetention: .zero, loadModel: { await uncachedProbe.load() })
@@ -340,6 +347,7 @@ private actor DictationModelProbe: DictationRecognitionModel, DictationRecogniti
         var starts = 0
         var resets = 0
         var cancels = 0
+        var unloads = 0
     }
 
     struct Trace {
@@ -351,6 +359,7 @@ private actor DictationModelProbe: DictationRecognitionModel, DictationRecogniti
 
     private(set) var counts = Counts()
     var loads: Int { counts.loads }
+    var unloads: Int { counts.unloads }
     private(set) var lastTrace: Trace?
     private var configuration: TranscriptSegmentationConfiguration?
     private var pcm: [Float] = []
@@ -388,6 +397,12 @@ private actor DictationModelProbe: DictationRecognitionModel, DictationRecogniti
     func cancel() { counts.cancels += 1 }
     func blockNextFinish(_ signal: DictationTestSignal) { finishBlocked = signal }
     func failNextReset() { failReset = true }
+
+    func unload() {
+        counts.unloads += 1
+        pcm.removeAll()
+        configuration = nil
+    }
 
     func reset() throws {
         counts.resets += 1

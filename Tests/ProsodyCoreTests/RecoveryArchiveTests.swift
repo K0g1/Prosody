@@ -105,6 +105,48 @@ final class RecoveryArchiveTests: XCTestCase {
     }
 
     @MainActor
+    func testFailedDictationArchiveSurvivesReopenAndTemporaryCleanup() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let archive = AudioArchiveWriter(directoryURL: root.appendingPathComponent("Temporary/audio"))
+        let recoveryRoot = root.appendingPathComponent("Support/Recovery")
+        let recovery = RecoveryStore(rootURL: recoveryRoot)
+        var session = makeSession(id: UUID(), keepAudio: false)
+        session.sourceKind = "dictation"
+        session.liveTranscriptionEnabled = false
+        session.duration = 0.5
+
+        let emptyAdopted = try await recovery.adoptFailedDictation(session, archive: archive)
+        XCTAssertFalse(emptyAdopted)
+        for (index, rate) in [16_000.0, 48_000.0].enumerated() {
+            try await archive.append(CapturedAudioPacket(
+                source: .microphone,
+                presentationTime: Double(index) / 4,
+                sampleRate: rate,
+                samples: Array(repeating: 0.1, count: Int(rate / 4))
+            ))
+        }
+        let chunks = try await archive.finish()
+        XCTAssertEqual(chunks.count, 2)
+        let recordedBytes = try chunks.map { try Data(contentsOf: $0) }
+        let adopted = try await recovery.adoptFailedDictation(session, archive: archive)
+        XCTAssertTrue(adopted)
+        try await archive.discard()
+
+        let reopened = RecoveryStore(rootURL: recoveryRoot)
+        let recoverable = try await reopened.recoverableSessions()
+        XCTAssertEqual(recoverable.map(\.id), [session.id])
+        let recovered = try await reopened.load(id: session.id)
+        XCTAssertEqual(recovered.manifest.state, .recoverable)
+        XCTAssertEqual(recovered.manifest.session.sourceKind, "dictation")
+        XCTAssertFalse(recovered.manifest.session.keepAudio)
+        XCTAssertEqual(recovered.manifest.duration, 0.5)
+        let directory = await reopened.directoryURL(for: session.id)
+        let audio = try AudioArchiveMerger.recoveryAudioFiles(in: directory.appendingPathComponent("audio"))
+        XCTAssertEqual(try audio.map { try Data(contentsOf: $0) }, recordedBytes)
+    }
+
+    @MainActor
     func testNoSpeechCompletionStillMarksRecoveryCompleted() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
