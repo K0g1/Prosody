@@ -6,6 +6,15 @@ import Foundation
 @main
 struct ProsodyValidation {
     static func main() async throws {
+        let args = Array(CommandLine.arguments.dropFirst())
+        if args.first == "--model-smoke" {
+            guard (3...4).contains(args.count), let model = SpeechModel(rawValue: args[1]) else {
+                throw BenchmarkError("Usage: ProsodyValidation --model-smoke <model-id> <audio-file> [existing-cache-root]")
+            }
+            let existing = args.count == 4 ? URL(fileURLWithPath: args[3], isDirectory: true) : nil
+            try await checkDownloadAndTranscribe(model: model, audio: URL(fileURLWithPath: args[2]), existing: existing)
+            return
+        }
         if let command = CommandLine.arguments.dropFirst().first,
            command == "--benchmark-dictation" ||
            command == "--benchmark-dictation-lifecycle" ||
@@ -29,6 +38,39 @@ struct ProsodyValidation {
         try await checkRegistry()
         await checkPlaybackTimeline()
         print("ProsodyValidation: PASS")
+    }
+
+    private static func checkDownloadAndTranscribe(model: SpeechModel, audio: URL, existing: URL?) async throws {
+        let root = existing ?? FileManager.default.temporaryDirectory.appendingPathComponent("Prosody-Model-QA-\(UUID())")
+        defer { if existing == nil { try? FileManager.default.removeItem(at: root) } }
+        let inventory = STTModelManager(rootURL: root)
+        let descriptor = model.descriptor
+        let transcriber = AudioFileTranscriber(inventory: inventory)
+        if existing == nil {
+            do {
+                _ = try await transcriber.transcribe(files: [.microphone: [audio]], model: model)
+                throw BenchmarkError("A missing model unexpectedly transcribed audio")
+            } catch STTModelManagerError.modelNotFound {}
+            print("Downloading \(descriptor.displayName)")
+            try await inventory.install(descriptor) { _ in }
+        }
+        ModelHub.offlineMode = true
+        let installed = await inventory.isInstalled(descriptor)
+        guard installed else { throw BenchmarkError("Downloaded model is missing") }
+        let result = try await transcriber.transcribe(files: [.microphone: [audio]], model: model)
+        let raw = result.transcript.rawText
+        guard !raw.isEmpty, result.transcript.segments.allSatisfy({ $0.start >= 0 && $0.end <= result.duration + 0.1 }) else {
+            throw BenchmarkError("Transcript was empty or contained invalid timings")
+        }
+        print(raw)
+        if existing == nil {
+            try await inventory.remove(descriptor)
+            let stillInstalled = await inventory.isInstalled(descriptor)
+            guard !stillInstalled else { throw BenchmarkError("Model remains installed after deletion") }
+            print("\(descriptor.displayName): download, offline inference, and deletion PASS")
+        } else {
+            print("\(descriptor.displayName): offline inference PASS")
+        }
     }
 
     private static func runBenchmark(_ command: String, arguments: [String]) async {

@@ -193,7 +193,7 @@ public enum MarkdownRenderer {
             .replacingOccurrences(of: "\r", with: " ")
     }
 
-    private static func escapeInline(_ value: String) -> String {
+    static func escapeInline(_ value: String) -> String {
         var result = value.replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
         for character in ["\\", "`", "*", "_", "[", "]"] {
             result = result.replacingOccurrences(of: character, with: "\\\(character)")

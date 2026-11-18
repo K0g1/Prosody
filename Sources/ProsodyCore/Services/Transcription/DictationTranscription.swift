@@ -318,6 +318,10 @@ public actor DictationRecognizer {
         await modelCache.releaseIfIdle()
     }
 
+    func releaseAndWaitIfIdle() async {
+        await modelCache.releaseAndWaitIfIdle()
+    }
+
     public func finishScope(_ scope: UUID) async {
         scopeLoadFailures[scope] = nil
         await modelCache.endScope(scope)

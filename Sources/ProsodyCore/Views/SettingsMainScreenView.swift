@@ -10,7 +10,7 @@ struct MainScreenSettingsView: SettingsSearchPage {
                 get: { pane.preferences.showsOnMainScreen(section) },
                 set: { pane.preferences.setMainScreenSection(section, visible: $0) }
             ))
-            .labelsHidden().toggleStyle(.switch)
+            .labelsHidden().toggleStyle(.prosodySwitch)
             .accessibilityIdentifier(entry.id)
         }
     })

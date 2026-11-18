@@ -39,6 +39,13 @@ RELEASE_LABEL="$(plist_value "$APP_PLIST" ClippyReleaseLabel)"
 [[ "${PROSODY_RELEASE_LABEL:-${CLIPPY_RELEASE_LABEL:-$RELEASE_LABEL}}" == "$RELEASE_LABEL" ]] || die "Use ClippyReleaseLabel in Resources/Info.plist to name the release."
 
 [[ -x "$APP_BUNDLE/Contents/MacOS/Prosody" ]] || die "Missing staged executable."
+[[ -x "$APP_BUNDLE/Contents/Helpers/prosody" ]] || die "Missing command-line helper."
+[[ -s "$APP_BUNDLE/Contents/Resources/Metadata.appintents/extract.actionsdata" ]] || die "Missing Shortcuts metadata."
+[[ -s "$APP_BUNDLE/Contents/Resources/SKILL.md" ]] || die "Missing CLI skill."
+[[ -x "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/Current/Autoupdate" ]] || die "Missing update framework."
+for key in SUFeedURL SUPublicEDKey SUVerifyUpdateBeforeExtraction SURequireSignedFeed; do
+  [[ "$(plist_value "$SOURCE_PLIST" "$key")" == "$(plist_value "$APP_PLIST" "$key")" ]] || die "Staged $key differs from the release configuration."
+done
 [[ -f "$NOTICES/README.md" ]] || die "The staged app is missing third-party notices."
 /usr/bin/diff -qr "$ROOT_DIR/Resources/ThirdPartyNotices" "$NOTICES" ||
   die "The staged notices do not match the current source."
@@ -56,7 +63,9 @@ fi
 
 DMG_NAME="Prosody-$RELEASE_LABEL.dmg"
 OUTPUT="$DIST_DIR/$DMG_NAME"
-WORK_DIR="$(mktemp -d "$DIST_DIR/.prosody-dmg.XXXXXX")"
+# Build and verify on local storage. File-provider destinations can defer
+# reads of newly written payload files while hdiutil builds the filesystem.
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/prosody-dmg.XXXXXX")"
 PAYLOAD_DIR="$WORK_DIR/payload"
 MOUNT_DIR="$WORK_DIR/mount"
 IMAGE="$WORK_DIR/$DMG_NAME"
@@ -75,11 +84,10 @@ ln -s /Applications "$PAYLOAD_DIR/Applications"
 cat > "$PAYLOAD_DIR/README-FIRST-RUN.txt" <<INSTRUCTIONS
 Prosody $RELEASE_LABEL (build $BUILD)
 
-Upgrading from Clippy: quit the old copy, then move Clippy.app out of
-Applications before opening Prosody. Recorded data and settings stay on this Mac.
-
-Quit Prosody if it is running. Drag the app to Applications and open the
-installed copy from there.
+Quit the previous version, then drag Prosody to Applications and open the
+installed copy. To bring over earlier Clippy or Prosody settings, choose
+Settings > General > Import Preferences. Later in-app updates carry these
+preferences forward.
 
 Download this disk image only from:
 https://github.com/K0g1/Prosody/releases/tag/v$RELEASE_LABEL
@@ -89,8 +97,8 @@ signed and not notarized. If macOS blocks the first launch, select Prosody in
 Finder, open the context menu, and choose Open. You can also allow it in System
 Settings > Privacy & Security. Later launches use the normal menu-bar entry.
 
-In System Settings, grant Microphone or Screen & System Audio Recording
-for the sources you use. Global dictation also needs Accessibility access.
+Check Settings > Dictation for Microphone and Accessibility status.
+Grant Screen & System Audio Recording if you use system audio.
 
 Prosody downloads the speech model separately after installation.
 

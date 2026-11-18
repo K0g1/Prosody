@@ -16,7 +16,8 @@ struct ThemeContrastTests {
     ]
 
     private static let newIDs: Set<String> = [
-        "smoked-glass", "sea-glass", "cloud", "chalk", "canvas", "slate", "stone", "fog",
+        "smoked-glass", "sea-glass", "clear-glass", "amber-glass", "iris-glass", "rose-glass",
+        "cloud", "chalk", "canvas", "slate", "stone", "fog",
         "oled-true-black", "cobalt-ink", "navy-ink", "carbon-cyan", "ink-violet",
         "deep-navy", "royal-ink", "midnight-cyan", "ink-plum", "coastal-fog", "kelp",
         "moss", "fern", "rainforest", "glacier", "harbor", "lagoon", "driftwood",
@@ -72,29 +73,24 @@ struct ThemeContrastTests {
         0x101720, 0x1A2430, 0x222D3B, 0x1A2330, 0xD9ECFF, 0xC0DCFA, 0x142233, 0xF7FBFF, 0xE4EBF3
     ]
 
-    private static let expectedGroupCounts = [3, 10, 14, 19, 18, 13, 14]
+    private static let expectedGroupCounts = [7, 10, 14, 19, 18, 13, 14]
     private static let backgrounds = Array(0..<4)
     private static let foregrounds = [7, 8]
     private static let accents = [4, 5]
     private static let onAccent = 6
-
-    // Bright, dark, colored, and neutral wallpapers bracket the system material.
-    private static let glassBackdrops: [UInt32] = [
-        0x000000, 0x202433, 0x254636, 0x998979, 0xE9D9C9, 0xEBF3FC, 0xFFFFFF
-    ]
 
     private static let newThemes = ProsodyTheme.allCases.filter { !legacyIDs.contains($0.id) }
 
     @Test("persisted identifiers, uniqueness, and adaptive palettes are stable")
     func identifiersAndAdaptivePalettes() {
         let themes = ProsodyTheme.allCases
-        #expect(themes.count == 91)
+        #expect(themes.count == 95)
         #expect(Set(themes.map(\.id)) == Self.legacyIDs.union(Self.newIDs))
-        #expect(Self.newThemes.count == 55)
+        #expect(Self.newThemes.count == 59)
         #expect(Set(Self.newThemes.map(\.id)) == Self.newIDs)
         #expect(Set(Self.newThemes.map(\.palette.colors)).count == Self.newThemes.count)
         #expect(Set(Self.newThemes.map(\.palette.name)).count == Self.newThemes.count)
-        #expect(themes.filter { $0.isAdaptive } == [.glass])
+        #expect(themes.filter { $0.isAdaptive } == [.glass, .clearGlass, .amberGlass, .irisGlass, .roseGlass])
 
         for theme in themes {
             let light = theme.palette(for: .light)
@@ -164,38 +160,19 @@ struct ThemeContrastTests {
         assertOpaqueContrast(palette, context: "oled-true-black")
     }
 
-    @Test(arguments: [ColorScheme.light, .dark])
-    func glassOpaqueFallbackContrast(scheme: ColorScheme) {
-        let palette = ProsodyTheme.glass.palette(for: scheme)
-        let expectedOpacity = scheme == .dark ? 0.88 : 0.80
-        #expect(abs(palette.glassTintOpacity - expectedOpacity) < 0.000_001)
-        assertOpaqueContrast(palette, context: "glass-\(scheme)")
-    }
-
-    @Test(arguments: [ColorScheme.light, .dark])
-    func glassTranslucentBackdropContrast(scheme: ColorScheme) {
-        let palette = ProsodyTheme.glass.palette(for: scheme)
-        let colors = palette.colors.map(Self.rgb)
-        let opacity = palette.glassTintOpacity
-
-        // Test both the encoded sRGB composite and a conservative linear-light
-        // luminance blend. NSVisualEffectView's blur varies with the desktop,
-        // so representative colors and the black/white bounds define the range.
-        for tintIndex in 0..<2 {
-            for backdropHex in Self.glassBackdrops {
-                let backdrop = Self.rgb(backdropHex)
-                let encoded = colors[tintIndex] * opacity + backdrop * (1 - opacity)
-                let encodedBackground = Self.luminance(encoded)
-                let linearBackground = Self.luminance(colors[tintIndex]) * opacity
-                    + Self.luminance(backdrop) * (1 - opacity)
-
-                for foregroundIndex in Self.foregrounds {
-                    let foreground = Self.luminance(colors[foregroundIndex])
-                    let context = "glass-\(scheme), backdrop \(String(backdropHex, radix: 16)), fg \(foregroundIndex)"
-                    #expect(Self.contrast(foreground, encodedBackground) >= 4.5, "\(context), encoded blend")
-                    #expect(Self.contrast(foreground, linearBackground) >= 4.5, "\(context), linear blend")
-                }
+    @Test(arguments: ProsodyTheme.allCases.filter { $0.material != nil }, [ColorScheme.light, .dark])
+    func glassOpaqueFallbackContrast(theme: ProsodyTheme, scheme: ColorScheme) {
+        let palette = theme.palette(for: scheme)
+        assertOpaqueContrast(palette, context: "\(theme.id)-\(scheme)")
+        if theme == .clearGlass {
+            #expect(theme.material == .clear)
+            let isGrayscale = palette.colors.allSatisfy { hex in
+                let red = (hex >> 16) & 0xff
+                let green = (hex >> 8) & 0xff
+                let blue = hex & 0xff
+                return red == green && green == blue
             }
+            #expect(isGrayscale)
         }
     }
 

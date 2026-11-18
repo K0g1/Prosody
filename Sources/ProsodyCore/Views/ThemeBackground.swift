@@ -4,16 +4,26 @@ import SwiftUI
 /// opt in to translucency; other uses get the opaque palette.
 struct ThemeBackground: View {
     let palette: ThemePalette
-    var isAdaptive = false
+    var material: ThemeMaterial?
     var backdrop: ThemeBackdrop = .opaque
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         Group {
-            if isAdaptive, !reduceTransparency, backdrop != .opaque {
+            if let material, !reduceTransparency, backdrop != .opaque {
                 ZStack {
-                    if backdrop == .window { ThemeWindowMaterial() }
-                    palette.backdropGradient(opacity: palette.glassTintOpacity)
+                    if backdrop == .window {
+                        ThemeWindowMaterial()
+                    } else {
+                        Color.clear
+                    }
+                    if material == .tinted {
+                        LinearGradient(
+                            colors: [palette.backgroundEnd.opacity(0.48), palette.background.opacity(0.27)],
+                            startPoint: .topTrailing,
+                            endPoint: .bottomLeading
+                        )
+                    }
                 }
             } else {
                 opaqueBackground
@@ -114,6 +124,11 @@ struct ThemeBackground: View {
     }
 }
 
+extension EnvironmentValues {
+    @Entry var usesWindowMaterial = false
+    @Entry var usesMonochromeControls = false
+}
+
 enum ThemeBackdrop {
     /// Prosody owns the host window and installs one desktop-sampling effect.
     case window
@@ -124,9 +139,9 @@ enum ThemeBackdrop {
 }
 
 private extension ThemePalette {
-    func backdropGradient(opacity: Double = 1) -> LinearGradient {
+    func backdropGradient() -> LinearGradient {
         LinearGradient(
-            colors: [background.opacity(opacity), backgroundEnd.opacity(opacity)],
+            colors: [background, backgroundEnd],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
@@ -139,6 +154,7 @@ struct ThemedRoot<Content: View>: View {
     var backdrop: ThemeBackdrop = .window
     @ViewBuilder let content: () -> Content
     @Environment(\.colorScheme) private var systemScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         let theme = preferences.theme
@@ -147,10 +163,12 @@ struct ThemedRoot<Content: View>: View {
         content()
             .frame(maxWidth: expands ? .infinity : nil, maxHeight: expands ? .infinity : nil)
             .background {
-                ThemeBackground(palette: palette, isAdaptive: theme.isAdaptive, backdrop: backdrop)
+                ThemeBackground(palette: palette, material: theme.material, backdrop: backdrop)
                     .ignoresSafeArea(.container)
             }
             .environment(\.prosodyPalette, palette)
+            .environment(\.usesWindowMaterial, theme.material != nil && !reduceTransparency && backdrop != .opaque)
+            .environment(\.usesMonochromeControls, theme.material == .clear)
             .environment(\.colorScheme, scheme)
             .preferredColorScheme(theme.isAdaptive ? nil : scheme)
             .foregroundStyle(palette.text)
@@ -160,15 +178,88 @@ struct ThemedRoot<Content: View>: View {
     }
 }
 
+struct PaletteToggleStyle: ToggleStyle {
+    enum Kind { case checkbox, slidingSwitch }
+
+    @Environment(\.usesMonochromeControls) private var monochrome
+    @Environment(\.prosodyPalette) private var palette
+    @Environment(\.controlSize) private var controlSize
+    @Environment(\.isEnabled) private var isEnabled
+    let kind: Kind
+
+    func makeBody(configuration: Configuration) -> some View {
+        if monochrome {
+            Button { configuration.isOn.toggle() } label: {
+                switch kind {
+                case .checkbox:
+                    HStack(spacing: 6) {
+                        checkbox(selected: configuration.isOn)
+                        configuration.label
+                    }
+                case .slidingSwitch:
+                    toggleSwitch(selected: configuration.isOn)
+                }
+            }
+            .buttonStyle(.plain)
+            .opacity(isEnabled ? 1 : 0.5)
+            .accessibilityRepresentation { nativeToggle(configuration) }
+        } else {
+            nativeToggle(configuration)
+        }
+    }
+
+    @ViewBuilder
+    private func nativeToggle(_ configuration: Configuration) -> some View {
+        switch kind {
+        case .checkbox: Toggle(configuration).toggleStyle(.checkbox)
+        case .slidingSwitch: Toggle(configuration).toggleStyle(.switch)
+        }
+    }
+
+    private func checkbox(selected: Bool) -> some View {
+        let size: CGFloat = controlSize == .small ? 13 : 15
+        return RoundedRectangle(cornerRadius: 3)
+            .fill(selected ? palette.accent : palette.surface.opacity(0.65))
+            .strokeBorder(palette.border)
+            .overlay {
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(palette.onAccent)
+                }
+            }
+            .frame(width: size, height: size)
+    }
+
+    private func toggleSwitch(selected: Bool) -> some View {
+        Capsule()
+            .fill(selected ? palette.accent : palette.surface.opacity(0.65))
+            .strokeBorder(palette.border)
+            .overlay(alignment: selected ? .trailing : .leading) {
+                Circle()
+                    .fill(selected ? palette.onAccent : palette.secondary)
+                    .padding(2)
+            }
+            .frame(width: 29, height: 16)
+    }
+}
+
+extension ToggleStyle where Self == PaletteToggleStyle {
+    static var prosodyCheckbox: Self { .init(kind: .checkbox) }
+    static var prosodySwitch: Self { .init(kind: .slidingSwitch) }
+}
+
 struct ThemedControlButtonStyle: ButtonStyle {
     @Environment(\.prosodyPalette) private var palette
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.usesWindowMaterial) private var usesWindowMaterial
     func makeBody(configuration: Configuration) -> some View {
+        let fillOpacity = usesWindowMaterial ? 0.46 : 0.95
         configuration.label
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(palette.text)
             .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(palette.surface.opacity(configuration.isPressed ? 0.6 : 0.95), in: RoundedRectangle(cornerRadius: 7))
+            .background(palette.surface.opacity(configuration.isPressed ? fillOpacity * 0.6 : fillOpacity), in: RoundedRectangle(cornerRadius: 7))
             .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(palette.border) }
             .opacity(isEnabled ? 1 : 0.45)
     }

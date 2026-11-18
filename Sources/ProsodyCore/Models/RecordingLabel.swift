@@ -6,6 +6,7 @@ public struct RecordingLabel: Codable, Identifiable, Equatable, Sendable {
     public var name: String
     public var colorHex: String
     public var outputFolderPath: String?
+    public var transcriptCopy: LabelTranscriptCopy?
     public var namingPattern: String
     public var dateFormat: String
 

@@ -4,6 +4,7 @@ import SwiftUI
 
 struct SettingsSidebarView: View {
     @Environment(\.prosodyPalette) private var palette
+    @Environment(\.usesWindowMaterial) private var usesWindowMaterial
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     let selection: SettingsSection
     let select: (SettingsSection) -> Void
@@ -14,8 +15,7 @@ struct SettingsSidebarView: View {
     @State private var selectedResult = 0
 
     private static let index = SettingsSearchIndex(sections: SettingsSection.allCases.map { ($0, $0.page.controlsForSearch) })
-    private static let releaseLabel = Bundle.main.object(forInfoDictionaryKey: "ClippyReleaseLabel") as? String
-        ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+
 
     private var searchText: Binding<String> {
         Binding(get: { query }, set: { updateSearch($0) })
@@ -50,7 +50,7 @@ struct SettingsSidebarView: View {
             footer
         }
         .frame(maxHeight: .infinity)
-        .background(palette.sidebar.opacity(0.9))
+        .background(palette.sidebar.opacity(usesWindowMaterial ? 0.24 : 0.9))
     }
 
     private var sections: some View {
@@ -81,11 +81,9 @@ struct SettingsSidebarView: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            if let label = Self.releaseLabel {
-                Text(label)
-                    .font(.caption)
-                    .accessibilityLabel("Version \(label)")
-            }
+            Text(AppConstants.displayVersion)
+                .font(.caption)
+                .accessibilityLabel("Version \(AppConstants.displayVersion)")
             Spacer()
             Button {
                 AppWindowController.showAboutPanel()

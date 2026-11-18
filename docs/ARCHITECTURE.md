@@ -35,13 +35,13 @@ The menu-bar recorder is the normal recording surface. Settings and Transcripts 
 
 `RecordingLabelsStudioView` edits labels inside Settings. `RecordingLabelDraftStore` keeps unsaved drafts and folder bookmarks across page recreation and section changes. A label has a stable identifier, name, color, output folder, naming pattern, and date format. The first selected label is primary and supplies the recording title pattern and destination. Labels are snapshotted into saved sessions, so renaming or deleting a label does not rewrite existing files or remove its identity from saved recordings.
 
-`ProsodyTheme` preserves the existing persisted theme identifiers while exposing the Prosody catalog. It contains 91 themes in seven groups. The same semantic palette feeds the recorder, Settings, Transcripts, sheets, popovers, and dictation overlay. Frosted Glass is the adaptive system-appearance theme. Reduce Transparency selects an opaque fallback, and Reduce Motion disables waveform interpolation. The menu-bar and Dock icons remain monochrome.
+`ProsodyTheme` preserves persisted theme identifiers across 95 palettes. Material selection and light/dark appearance are independent. Glass themes use the native NSPopover backdrop in the tray and one AppKit behind-window effect per owned window. Tinted themes add a translucent palette wash. Clear Glass uses grayscale tokens. Reduce Transparency selects an opaque fallback.
 
 ## Transcript library and reader
 
 `TranscriptLibraryQuery` filters saved sessions by title and label, an optional label identifier, and an audio-presence filter. It sorts by newest, oldest, recording name, longest, shortest, or label, with a stable UUID tie-break. The library hides dictation by default; **Include Dictation** opts those sessions back in. The **With retained audio** and **Without retained audio** checkboxes both start on, and the UI prevents both from being turned off.
 
-The reader is a separate projection from the library list. `TranscriptReaderCache` builds a chronological `TranscriptTimeline` and filters it by transcript text or visible speaker name. Search suspends automatic following and disables **Follow Audio** until the query is cleared. Manual scrolling also suspends following. An explicit timeline scrub can move the highlighted row even when automatic following is off, unless a search is active.
+The reader is a separate projection from the library list. `TranscriptReaderCache` builds a chronological `TranscriptTimeline` and filters it by transcript text or visible speaker name. Search suspends automatic following and disables **Follow Audio** until the query is cleared. Manual scrolling also suspends following. Adjacent playback rows center with a cancellable scroll animation that respects Reduce Motion. An explicit timeline scrub can move the highlighted row even when automatic following is off, unless a search is active.
 
 ### Optional source kind and legacy inference
 
@@ -69,7 +69,14 @@ The controller captures the destination application and available Accessibility 
 
 `ScreenCaptureCoordinator` wraps ScreenCaptureKit for system audio and AVFoundation for the microphone. `AudioSampleConverter` normalizes formats, and the meter calculator feeds the UI. `AudioArchiveWriter` writes temporary chunks during recording so a crash can leave recoverable audio. The selected capture mode determines which sources are requested; permissions are requested explicitly before capture.
 
-`STTRegistry` describes the available engines and models. `ParakeetEngine` is the production adapter around FluidAudio, and `ParakeetStreamingSession` accepts source audio and yields partial and final updates. `TranscriptCoordinator` maintains the canonical transcript; `StreamingTranscriptAssembler`, `TranscriptChunker`, and `EchoDeduplicator` handle partial updates, block boundaries, and duplicate content. `AudioFileTranscriber` decodes bounded PCM chunks for imports and deferred recordings. `WordReplacementProcessor` applies literal, case-insensitive whole-word rules before persistence and notes generation.
+`SpeechModel` lists the supported models. `STTModelManager` validates model files in a private staging directory and moves a completed package to the cache. Only explicit downloads access the network. The additional TDT models use pinned Core ML manifests with byte counts and SHA-256 hashes for weight files. Unified keeps its previous cache path. Batch models use bounded PCM and FluidAudio’s disk-backed window processing. `ParakeetEngine` is the production adapter around FluidAudio, and `ParakeetStreamingSession` accepts source audio and yields partial and final updates. `TranscriptCoordinator` maintains the canonical transcript; `StreamingTranscriptAssembler`, `TranscriptChunker`, and `EchoDeduplicator` handle partial updates, block boundaries, and duplicate content. `AudioFileTranscriber` decodes bounded PCM chunks for imports and deferred recordings. The optional filler filter removes hesitation sounds and transfers sentence capitalization to the next surviving word. It keeps word times for unchanged words and runs before literal whole-word substitutions. Substitutions run after speaker alignment so reconstructing timed segments preserves corrected text.
+
+## File workflows and automation
+
+The importer accepts a native multi-file selection and an optional saved label, and reuses one prepared model across files. Each file commits an independent session. `TranscriptExportFormatter` renders the user-configurable exports and label copies, while the session store retains its original Markdown and JSON contract. Bulk export preserves library selection order and creates collision-safe filenames. The audio exporter copies the retained tracks separately. The compressor stages verified smaller AAC alternatives and commits them with one directory replacement.
+
+App Intents run in the app’s process. The packaged CLI uses a private per-user UNIX socket and a versioned request protocol. It starts only when enabled and the app is open. Both file automation entry points lease the same recognizer used by dictation and serialize with capture and model selection. Long CLI batches keep a lease scope across files so model retention cannot expire between them. The CLI process has no dependency on Core ML or FluidAudio.
+
 
 Transcript layout preferences snapshot at the start of each recording, import, recovery, or dictation. The defaults are 40 words per block and a 1.5-second pause; accepted ranges are 10–100 words and 0.5–5 seconds. The reader and stored segments do not rewrite existing transcripts when the preference changes.
 
@@ -79,7 +86,7 @@ Transcript layout preferences snapshot at the start of each recording, import, r
 
 The beta keeps the bundle identifier `com.openai.clippy` and the previous support location for upgrade compatibility. `ProsodyStorage.applicationSupportDirectory` prefers an existing sandbox support directory at `~/Library/Containers/com.openai.clippy/Data/Library/Application Support/Clippy` and otherwise uses `~/Library/Application Support/Clippy`. Models live under its `Models` directory and recovery data under `Recovery`. Clean installs use `~/Prosody` for output; upgrades keep the saved folder or an existing `~/Clippy`.
 
-`LegacyDataMigration` runs once under `migration.directDistribution.v1`. It imports missing `preferences.*` values from the old sandbox plist and, when no direct output preference exists, can select the old sandbox `Clippy` output folder. It does not move or delete saved recordings. The unchanged bundle identifier and signing identity are what let macOS associate an upgrade with the previous app; changing either can require permission grants again.
+`ProsodyPreferences` loads from the dedicated `com.openai.clippy.preferences.v1` suite and persists each setting independently. Keep the suite name across releases. The typed setting codecs accept values from an explicitly chosen prior domain, sandbox plist, or backup. Older app domains remain available for manual import. The new version uses the same current suite after an in-app update. macOS grants and machine-local registrations have their own lifecycles.
 
 ## Notes and network policy
 
@@ -87,6 +94,6 @@ The template notes provider creates a deterministic Offline Outline locally. `Op
 
 ## Packaging and release boundary
 
-`Resources/Info.plist` keeps `ClippyReleaseLabel` as a compatibility key and defines the display name, numeric version and build, minimum OS, and capture usage descriptions. The source keeps the bundle identifier for upgrade compatibility. The build script stages the SwiftPM executable, resources, and third-party notices into `dist/Prosody.app` before signing. New commands use `PROSODY_*` environment names; `CLIPPY_*` remains a compatibility alias.
+`Resources/Info.plist` defines the release label, numeric build, permission descriptions, and pinned Sparkle feed and key. The build script embeds the SwiftPM executable, CLI helper, App Intents metadata, Sparkle framework, resources, and notices before signing. Sparkle verifies the feed and archive before extraction. The update delegate waits for active audio work to finish and flushes settings before relaunch.
 
 The release packager verifies the staged app, mounted image, absence of bundled model weights, and SHA-256 checksum. A valid signature proves bundle integrity; it does not establish notarization or Gatekeeper acceptance. See [Releasing Prosody](RELEASING.md).

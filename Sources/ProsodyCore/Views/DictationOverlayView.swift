@@ -25,7 +25,6 @@ struct DictationOverlayView: View {
 
     var body: some View {
         let layout = DictationOverlayLayout(state: controller.state, appearance: preferences.dictationOverlayAppearance)
-        let palette = preferences.theme.palette
         let shape = RoundedRectangle(cornerRadius: layout.cornerRadius)
         ThemedRoot(preferences: preferences) {
             Group {
@@ -33,8 +32,7 @@ struct DictationOverlayView: View {
                 else { fullOverlay.padding(18) }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: layout == .minimal ? .center : .topLeading)
-            .background(palette.surface.opacity(layout == .minimal ? 0.8 : 0.6), in: shape)
-            .overlay { shape.strokeBorder(layout == .minimal ? palette.border : palette.secondary.opacity(0.12)) }
+            .modifier(DictationOverlaySurface(layout: layout, shape: shape))
         }
         .clipShape(shape)
         .accessibilityIdentifier("clippy.dictation.overlay")
@@ -81,6 +79,19 @@ struct DictationOverlayView: View {
             }
         }
         .buttonStyle(.borderless)
+    }
+}
+
+private struct DictationOverlaySurface: ViewModifier {
+    @Environment(\.prosodyPalette) private var palette
+    @Environment(\.usesWindowMaterial) private var usesWindowMaterial
+    let layout: DictationOverlayLayout
+    let shape: RoundedRectangle
+
+    func body(content: Content) -> some View {
+        content
+            .background(palette.surface.opacity(usesWindowMaterial ? 0.33 : 0.65), in: shape)
+            .overlay { shape.strokeBorder(layout == .minimal ? palette.border : palette.secondary.opacity(0.12)) }
     }
 }
 

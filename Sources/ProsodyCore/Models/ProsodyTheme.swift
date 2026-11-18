@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Stable identifiers are persisted; every surface consumes the same palette.
-/// Fixed themes use static artwork. Frosted Glass follows the system appearance.
+/// Material and appearance are separate so a palette can use native glass
+/// with either a fixed appearance or an adaptive light and dark variant.
 public enum ProsodyTheme: String, CaseIterable, Codable, Identifiable, Hashable, Sendable {
     case graphite, pearl, midnight, aurora, fjord, tidal, pine, matcha
     case dune, terracotta, rosewater, plum, amethyst, copper, solar
@@ -15,6 +16,10 @@ public enum ProsodyTheme: String, CaseIterable, Codable, Identifiable, Hashable,
     case deepSea = "deep-sea"
     case lichen, redwood, espresso, mulberry, ultramarine, eclipse, verdigris
     case glass
+    case clearGlass = "clear-glass"
+    case amberGlass = "amber-glass"
+    case irisGlass = "iris-glass"
+    case roseGlass = "rose-glass"
 
     case smokedGlass = "smoked-glass"
     case seaGlass = "sea-glass"
@@ -44,17 +49,30 @@ public enum ProsodyTheme: String, CaseIterable, Codable, Identifiable, Hashable,
     case mossAgate = "moss-agate"
 
     public var id: String { rawValue }
-    public var isAdaptive: Bool { self == .glass }
+    public var isAdaptive: Bool { ThemeCatalog.darkGlassPalettes[self] != nil }
 
-    /// Fixed themes ignore the scheme; Frosted Glass has separate light and dark colors.
     public func palette(for colorScheme: ColorScheme) -> ThemePalette {
-        self == .glass && colorScheme == .dark ? ThemeCatalog.glassDark : palette
+        if colorScheme == .dark, let dark = ThemeCatalog.darkGlassPalettes[self] { return dark }
+        return palette
+    }
+
+    var material: ThemeMaterial? {
+        switch self {
+        case .clearGlass: .clear
+        case .glass, .smokedGlass, .seaGlass, .amberGlass, .irisGlass, .roseGlass: .tinted
+        default: nil
+        }
     }
 
     /// The fixed palette, or the light variant for a preview without an appearance context.
     public var palette: ThemePalette {
         ThemeCatalog.palette(for: self)
     }
+}
+
+enum ThemeMaterial {
+    case clear
+    case tinted
 }
 
 enum ThemeGroup: String, CaseIterable, Identifiable, Hashable, Sendable {
@@ -100,10 +118,18 @@ enum ThemeCatalog {
         .init(group: .systemGlass, entries: [
             .init(theme: .glass, palette: .init("Frosted Glass", "Icy silver · follows system appearance", dark: false,
                 colors: [0xEFF4FA, 0xDDE7F2, 0xF7FAFF, 0xE8EFF7, 0x1D466D, 0x2B5177, 0xFFFFFF, 0x202C3B, 0x354456])),
-            .init(theme: .smokedGlass, palette: .init("Smoked Glass", "Smoked graphite · amber edge · icy reflection", dark: true, pattern: .facets,
+            .init(theme: .clearGlass, palette: .init("Clear Glass", "Neutral glass · follows system appearance", dark: false,
+                colors: [0xECECEC, 0xDBDBDB, 0xFFFFFF, 0xE6E6E6, 0x353535, 0x4C4C4C, 0xFFFFFF, 0x1D1D1D, 0x464646])),
+            .init(theme: .smokedGlass, palette: .init("Smoked Glass", "Charcoal glass with warm amber accents", dark: true,
                 colors: [0x171B1F, 0x2D343B, 0x20262C, 0x171C21, 0xE7B36A, 0xB8D7E8, 0x21170A, 0xF5F7F8, 0xC3CDD4])),
-            .init(theme: .seaGlass, palette: .init("Sea Glass", "Frosted aqua · sea green · soft ripples", dark: false, pattern: .waves,
-                colors: [0xEEF7F5, 0xCFE7E2, 0xF9FDFC, 0xE3F1EE, 0x1F655E, 0x2F7B8A, 0xFFFFFF, 0x173B38, 0x3E625E]))
+            .init(theme: .seaGlass, palette: .init("Sea Glass", "Translucent aqua · soft teal controls", dark: false,
+                colors: [0xEEF7F5, 0xCFE7E2, 0xF9FDFC, 0xE3F1EE, 0x1F655E, 0x2F7B8A, 0xFFFFFF, 0x173B38, 0x3E625E])),
+            .init(theme: .amberGlass, palette: .init("Amber Glass", "Honey and bronze · follows system appearance", dark: false,
+                colors: [0xFBF2DF, 0xF3D7A5, 0xFFF9EF, 0xF4E6CF, 0x79501D, 0x8A581C, 0xFFFFFF, 0x362817, 0x634B2D])),
+            .init(theme: .irisGlass, palette: .init("Iris Glass", "Lavender and violet · follows system appearance", dark: false,
+                colors: [0xF5EEFC, 0xDDD0F4, 0xFBF8FE, 0xECE3F7, 0x543D84, 0x674A97, 0xFFFFFF, 0x2F2440, 0x55436B])),
+            .init(theme: .roseGlass, palette: .init("Rose Glass", "Blush and wine · follows system appearance", dark: false,
+                colors: [0xFBEDF1, 0xF2CFDA, 0xFFF7FA, 0xF5E1E8, 0x793557, 0x903D68, 0xFFFFFF, 0x3B2431, 0x674053]))
         ]),
         .init(group: .essentials, entries: [
             .init(theme: .graphite, palette: .init("Graphite", "Brushed silver · sculpted charcoal", dark: true, pattern: .facets,
@@ -299,8 +325,18 @@ enum ThemeCatalog {
     static let palettes: [ProsodyTheme: ThemePalette] = Dictionary(
         uniqueKeysWithValues: entries.map { ($0.theme, $0.palette) }
     )
-    static let glassDark = ThemePalette("Frosted Glass", "Icy silver · follows system appearance", dark: true,
-        colors: [0x101720, 0x1A2430, 0x222D3B, 0x1A2330, 0xD9ECFF, 0xC0DCFA, 0x142233, 0xF7FBFF, 0xE4EBF3])
+    static let darkGlassPalettes: [ProsodyTheme: ThemePalette] = [
+        .glass: .init("Frosted Glass", "Icy silver · follows system appearance", dark: true,
+            colors: [0x101720, 0x1A2430, 0x222D3B, 0x1A2330, 0xD9ECFF, 0xC0DCFA, 0x142233, 0xF7FBFF, 0xE4EBF3]),
+        .clearGlass: .init("Clear Glass", "Neutral glass · follows system appearance", dark: true,
+            colors: [0x171717, 0x272727, 0x303030, 0x202020, 0xF5F5F5, 0xC8C8C8, 0x242424, 0xF8F8F8, 0xCCCCCC]),
+        .amberGlass: .init("Amber Glass", "Honey and bronze · follows system appearance", dark: true,
+            colors: [0x2B2116, 0x512F17, 0x39291B, 0x302116, 0xFFE0A9, 0xF7BC69, 0x37210F, 0xFFF5E6, 0xE1C9A6]),
+        .irisGlass: .init("Iris Glass", "Lavender and violet · follows system appearance", dark: true,
+            colors: [0x211A32, 0x382854, 0x322543, 0x291E3B, 0xEADDFF, 0xC6AAF6, 0x2A1D42, 0xFAF3FF, 0xD1BDE9]),
+        .roseGlass: .init("Rose Glass", "Blush and wine · follows system appearance", dark: true,
+            colors: [0x2C1C28, 0x4B233A, 0x392433, 0x301F2C, 0xFFD8E9, 0xEDAECF, 0x3B1B2B, 0xFFF3F8, 0xE4BED0])
+    ]
 
     static func palette(for theme: ProsodyTheme) -> ThemePalette {
         guard let palette = palettes[theme] else {
@@ -331,8 +367,6 @@ public struct ThemePalette: Equatable, Sendable {
     var text: Color { Color(themeHex: colors[7]) }
     var secondary: Color { Color(themeHex: colors[8]) }
     var border: Color { secondary.opacity(dark ? 0.24 : 0.22) }
-    // Keep readable foregrounds even when a contrasting window fills the backdrop.
-    var glassTintOpacity: Double { dark ? 0.88 : 0.80 }
     var accentGradient: LinearGradient { .init(colors: [accent, accentEnd], startPoint: .topLeading, endPoint: .bottomTrailing) }
 }
 

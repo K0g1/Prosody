@@ -2,6 +2,8 @@ import SwiftUI
 
 public struct TranscriptLibraryView: View {
     @Environment(\.prosodyPalette) private var palette
+    @Environment(\.usesWindowMaterial) private var usesWindowMaterial
+    @Environment(\.usesMonochromeControls) private var usesMonochromeControls
     @ObservedObject var model: AppModel
     @State private var search = ""
     @State private var labelID: UUID?
@@ -15,6 +17,7 @@ public struct TranscriptLibraryView: View {
     @State private var selectedSessionSummary: SessionSummary?
     @State private var deleteID: UUID?
     @State private var queryRevision = 0
+    @FocusState private var searchFocused: Bool
 
     public init(model: AppModel) { self.model = model }
 
@@ -82,7 +85,41 @@ public struct TranscriptLibraryView: View {
 
     public var body: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 0) {
+            if model.librarySidebarVisible {
+                sidebar
+                Divider()
+            }
+            detail
+        }
+        .tint(palette.accent)
+        .accessibilityIdentifier("clippy.library")
+        .task(id: queryRevision) { await refreshResults() }
+        .onChange(of: search) { _, _ in queryRevision &+= 1 }
+        .onChange(of: labelID) { _, _ in queryRevision &+= 1 }
+        .onChange(of: sort) { _, _ in queryRevision &+= 1 }
+        .onChange(of: includeDictation) { _, _ in queryRevision &+= 1 }
+        .onChange(of: showRetainedAudio) { _, _ in queryRevision &+= 1 }
+        .onChange(of: showUnretainedAudio) { _, _ in queryRevision &+= 1 }
+        .onAppear {
+            if model.libraryShowDictationRequest > 0 { includeDictation = true }
+        }
+        .onChange(of: model.libraryShowDictationRequest) { _, _ in includeDictation = true }
+        .onChange(of: model.libraryFindRequest) { _, _ in searchFocused = true }
+        .onChange(of: model.selectedSessionID) { _, id in
+            if let id, !model.librarySelection.contains(id) {
+                model.librarySelection = displayedSessions.contains(where: { $0.id == id }) ? [id] : []
+            }
+            syncSelectedSummary()
+            queryRevision &+= 1
+        }
+        .onChange(of: model.recentSessions) { _, _ in
+            syncSelectedSummary()
+            queryRevision &+= 1
+        }
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
                 WindowChromeSidebarHeader {
                     HStack(spacing: 8) {
                         Text("Transcripts")
@@ -104,7 +141,13 @@ public struct TranscriptLibraryView: View {
                             .accessibilityHidden(true)
                         TextField("Search transcripts", text: $search)
                             .textFieldStyle(.plain)
-                            .onSubmit { if let first = displayedSessions.first { model.selectSession(first.summary) } }
+                            .focused($searchFocused)
+                            .onSubmit {
+                                if let first = displayedSessions.first {
+                                    model.librarySelection = [first.id]
+                                    model.selectSession(first.summary)
+                                }
+                            }
                             .help("Search transcript titles and labels")
                             .accessibilityLabel("Search transcript titles and labels")
                             .accessibilityIdentifier("clippy.library.search")
@@ -149,7 +192,7 @@ public struct TranscriptLibraryView: View {
                         Toggle("With retained audio", isOn: retainedAudioBinding)
                         Toggle("Without retained audio", isOn: unretainedAudioBinding)
                     }
-                    .toggleStyle(.checkbox)
+                    .toggleStyle(.prosodyCheckbox)
                     .controlSize(.small)
                     .font(.caption)
                 }
@@ -163,19 +206,23 @@ public struct TranscriptLibraryView: View {
                     sessionList(displayedSessions)
                 }
                 Divider()
-                Button("Transcribe Audio File…", systemImage: "square.and.arrow.down") { model.chooseTranscriptionFile() }
+                Button("Transcribe Audio Files…", systemImage: "square.and.arrow.down") { model.chooseTranscriptionFile() }
                     .disabled(!model.canBrowseSessions)
-                    .help("Transcribe an existing audio file")
+                    .help("Transcribe one or more audio files and choose their label and filenames")
                     .accessibilityIdentifier("clippy.library.import")
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
             }
             .frame(width: 285)
-            .background(palette.sidebar.opacity(0.9))
-            Divider()
-            VStack(spacing: 0) {
+            .background(palette.sidebar.opacity(usesWindowMaterial ? 0.24 : 0.9))
+    }
+
+    private var detail: some View {
+        VStack(spacing: 0) {
                 WindowChromeDragRegion()
-                if selectedDictationIsHidden {
+                if model.librarySelection.count > 1 {
+                    multipleSelection
+                } else if selectedDictationIsHidden {
                     hiddenDictationDetail
                 } else if shouldShowTranscript {
                     TranscriptWindowRootView(model: model)
@@ -187,7 +234,8 @@ public struct TranscriptLibraryView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 if !model.canBrowseSessions {
-                    Text(model.dictation.isActive ? "Dictation is in progress…" : model.recordingState.statusTitle)
+                    Text(model.isImportingAudio ? (model.lastNotice ?? "Preparing audio files…") :
+                        model.dictation.isActive ? "Dictation is in progress…" : model.recordingState.statusTitle)
                         .font(.callout).foregroundStyle(palette.secondary).padding(10)
                 }
                 if let error = model.userFacingError {
@@ -195,25 +243,7 @@ public struct TranscriptLibraryView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(palette.surface.opacity(0.42))
-        }
-        .tint(palette.accent)
-        .accessibilityIdentifier("clippy.library")
-        .task(id: queryRevision) { await refreshResults() }
-        .onChange(of: search) { _, _ in queryRevision &+= 1 }
-        .onChange(of: labelID) { _, _ in queryRevision &+= 1 }
-        .onChange(of: sort) { _, _ in queryRevision &+= 1 }
-        .onChange(of: includeDictation) { _, _ in queryRevision &+= 1 }
-        .onChange(of: showRetainedAudio) { _, _ in queryRevision &+= 1 }
-        .onChange(of: showUnretainedAudio) { _, _ in queryRevision &+= 1 }
-        .onChange(of: model.selectedSessionID) { _, _ in
-            syncSelectedSummary()
-            queryRevision &+= 1
-        }
-        .onChange(of: model.recentSessions) { _, _ in
-            syncSelectedSummary()
-            queryRevision &+= 1
-        }
+            .background(palette.surface.opacity(usesWindowMaterial ? 0.12 : 0.42))
     }
 
     private var emptyState: some View {
@@ -257,23 +287,63 @@ public struct TranscriptLibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var multipleSelection: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "document.on.document").font(.largeTitle).foregroundStyle(palette.secondary)
+            Text("\(model.librarySelection.count) transcripts selected").font(.title2)
+            HStack {
+                Button("Copy Raw Text") { model.copySelectedTranscripts(format: .rawText) }
+                    .help("Copy speech from the selected transcripts as plain text")
+                Button("Copy Markdown") { model.copySelectedTranscripts(format: .markdown) }
+                    .help("Copy the selected transcripts using the Markdown export settings")
+                Menu("Export") {
+                    Button("Separate Markdown Files…") { model.chooseExport(.separateMarkdown) }
+                    Button("Combined Markdown File…") { model.chooseExport(.combinedMarkdown) }
+                    Button("Retained Audio…") { model.chooseExport(.audio) }
+                        .disabled(!model.selectionMayHaveAudio)
+                }
+                .help("Export the selected transcripts or their retained audio")
+            }
+            .disabled(!model.canBrowseSessions)
+            if let notice = model.lastNotice, model.canBrowseSessions {
+                Text(notice).font(.callout).foregroundStyle(palette.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     private func sessionList(_ sessions: [LibraryDisplayItem]) -> some View {
-        ScrollView {
-            LazyVStack(spacing: 3) {
-                ForEach(sessions) { item in
-                    sessionRow(item)
-                        .id(item.id)
+        List(selection: Binding(
+            get: { Set(model.librarySelection) },
+            set: { ids in
+                guard model.canBrowseSessions else { return }
+                model.librarySelection = sessions.map(\.id).filter(ids.contains)
+                if ids.count == 1, let item = sessions.first(where: { ids.contains($0.id) }) {
+                    model.selectSession(item.summary)
                 }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
+        )) {
+            ForEach(sessions) { item in
+                sessionRow(item)
+                    .padding(.horizontal, usesMonochromeControls ? 8 : 0)
+                    .padding(.vertical, usesMonochromeControls ? 1 : 0)
+                    .background {
+                        if usesMonochromeControls && model.librarySelection.contains(item.id) { palette.surface }
+                    }
+                    .tag(item.id)
+                    .listRowInsets(usesMonochromeControls ? EdgeInsets() : EdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+            }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .disabled(!model.canBrowseSessions)
     }
 
     private func sessionRow(_ item: LibraryDisplayItem) -> some View {
         VStack(spacing: 0) {
-            Button { model.selectSession(item.summary) } label: {
-                HStack(alignment: .top, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
                     Image(systemName: item.summary.isDictation ? "waveform" : "doc.text")
                         .font(.system(size: 12, weight: .medium))
                         .frame(width: 16)
@@ -300,28 +370,22 @@ public struct TranscriptLibraryView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 7)
-                .background(
-                    model.selectedSessionID == item.id ? palette.accent.opacity(0.12) : .clear,
-                    in: RoundedRectangle(cornerRadius: 8)
-                )
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!model.canBrowseSessions)
-            .accessibilityAddTraits(model.selectedSessionID == item.id ? [.isSelected] : [])
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel(item.summary.title)
             .accessibilityValue("\(item.dateText), \(item.durationText)")
-            .accessibilityHint("Opens the transcript")
             .accessibilityIdentifier("clippy.library.session.\(item.id)")
-            .help("Open \(item.summary.title)")
+            .help("Select this transcript. Shift-click for a range or Command-click to add a transcript.")
             .contextMenu {
-                Button("Open Transcript") { model.selectSession(item.summary) }
+                Button("Open Transcript") {
+                    model.librarySelection = [item.id]
+                    model.selectSession(item.summary)
+                }
                 Button("Copy Transcript") { model.copySession(item.summary) }
                 Button("Reveal in Finder") { model.revealSession(item.summary) }
                     .disabled(item.summary.folderPath == nil)
                 Divider()
                 Button("Delete Recording…", role: .destructive) { deleteID = item.id }
-                    .disabled(!model.canBrowseSessions)
             }
             if deleteID == item.id {
                 InlineDeleteConfirmation(title: "Delete this transcript?", cancel: { deleteID = nil }) {
@@ -359,6 +423,11 @@ public struct TranscriptLibraryView: View {
             sessions.first(where: { $0.id == id })
         }
         displayedSessions = filtered.map(LibraryDisplayItem.init)
+        let selected = Set(model.librarySelection)
+        model.librarySelection = filtered.map(\.id).filter(selected.contains)
+        if model.librarySelection.isEmpty, let id = model.selectedSessionID, filtered.contains(where: { $0.id == id }) {
+            model.librarySelection = [id]
+        }
     }
 
     private func syncSelectedSummary() {

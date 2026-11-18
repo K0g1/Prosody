@@ -47,12 +47,20 @@ struct TranscriptFollowState: Equatable, Sendable {
 }
 
 struct TranscriptFollowPolicy: Sendable {
+    // Starts the centering motion just before the next spoken segment. The
+    // displayed transport clock and explicit seeks stay at the actual time.
+    static let playbackLead: TimeInterval = 0.18
+
     static func shouldFollow(
         autoFollow: Bool,
         isScrubbing: Bool,
         isSearchActive: Bool
     ) -> Bool {
         !isSearchActive && (autoFollow || isScrubbing)
+    }
+
+    static func rowTime(_ time: TimeInterval, playing: Bool, scrubbing: Bool) -> TimeInterval {
+        playing && !scrubbing ? time + playbackLead : time
     }
 }
 
@@ -73,7 +81,7 @@ final class TranscriptFollowController: ObservableObject {
         time: TimeInterval,
         timeline: TranscriptTimeline,
         allowsAnimation: Bool = true,
-        minimumInterval: Duration = .milliseconds(100)
+        minimumInterval: Duration = .milliseconds(40)
     ) {
         guard let next = state.update(
             time: time,
@@ -104,7 +112,12 @@ final class TranscriptFollowController: ObservableObject {
             try? await Task.sleep(for: delay)
             guard let self, !Task.isCancelled else { return }
             self.flushTask = nil
-            guard let pending = self.coalescer.takePending(at: self.clock.now) else { return }
+            let now = self.clock.now
+            if self.coalescer.pending != nil, let delay = self.coalescer.delayUntilNextEmission(at: now) {
+                self.scheduleFlush(after: delay)
+                return
+            }
+            guard let pending = self.coalescer.takePending(at: now) else { return }
             self.directive = pending
         }
     }
@@ -175,8 +188,12 @@ struct TranscriptAudioClockObserver: View {
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
-            .onAppear { synchronize(player.currentTime) }
-            .onChange(of: player.currentTime) { _, time in synchronize(time) }
+            .onAppear { synchronize() }
+            .onReceive(player.playbackTickPublisher) { time in synchronize(time) }
+            .onChange(of: player.currentTime) { _, _ in
+                if !player.isPlaying { synchronize() }
+            }
+            .onChange(of: player.isPlaying) { _, _ in synchronize() }
             .onChange(of: player.scrubEndRequest) { _, _ in
                 // SwiftUI can coalesce the final drag sample with commit.
                 // Keep the last thumb row even when auto-follow is off.
@@ -188,20 +205,22 @@ struct TranscriptAudioClockObserver: View {
                     minimumInterval: .milliseconds(33)
                 )
             }
-            .onChange(of: timeline) { _, _ in synchronize(player.currentTime) }
-            .onChange(of: autoFollow) { _, _ in synchronize(player.currentTime) }
-            .onChange(of: isSearchActive) { _, _ in synchronize(player.currentTime) }
+            .onChange(of: timeline) { _, _ in synchronize() }
+            .onChange(of: autoFollow) { _, _ in synchronize() }
+            .onChange(of: isSearchActive) { _, _ in synchronize() }
     }
 
-    private func synchronize(_ time: TimeInterval) {
+    private func synchronize(_ measuredTime: TimeInterval? = nil) {
         if shouldFollow {
+            let playing = player.isPlaying
+            let scrubbing = player.isScrubbing
+            let time = measuredTime ?? (playing ? player.measuredPlaybackTime : nil) ?? player.currentTime
             controller.update(
-                time: time,
+                time: TranscriptFollowPolicy.rowTime(time, playing: playing, scrubbing: scrubbing),
                 timeline: timeline,
-                allowsAnimation: !player.isScrubbing,
-                minimumInterval: player.isScrubbing ? .milliseconds(33) : .milliseconds(100)
+                allowsAnimation: playing && !scrubbing
             )
-        } else {
+        } else if controller.directive != nil {
             controller.suspend()
         }
     }

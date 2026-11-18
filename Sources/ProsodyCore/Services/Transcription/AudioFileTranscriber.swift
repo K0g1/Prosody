@@ -112,62 +112,72 @@ public actor AudioFileTranscriber {
 
     public init(engine: any STTEngine) { self.engine = engine }
 
-    public init(segmentationConfiguration: TranscriptSegmentationConfiguration = .persisted()) {
-        self.engine = ParakeetEngine(segmentationConfiguration: segmentationConfiguration)
+    public init(segmentationConfiguration: TranscriptSegmentationConfiguration = .persisted(),
+                inventory: STTModelManager = STTModelManager()) {
+        self.engine = ParakeetEngine(segmentationConfiguration: segmentationConfiguration, inventory: inventory)
     }
+
+    private var inUse = false
 
     public func transcribe(
         files: [AudioSource: [URL]],
         speakerMode: SpeakerMode = .off,
+        model: SpeechModel = .unified,
         progress: @Sendable @escaping (Double) -> Void = { _ in }
     ) async throws -> AudioFileTranscription {
-        guard !files.values.flatMap({ $0 }).isEmpty else { throw STTError.invalidAudio }
-        let registry = STTRegistry()
-        guard let model = await registry.model(id: "parakeet-unified", for: .parakeet) else {
-            throw STTError.unsupportedModel("parakeet-unified")
-        }
+        guard !inUse else { throw STTError.failed("Audio transcription is already running.") }
+        inUse = true
+        defer { inUse = false }
         do {
             try Task.checkCancellation()
-            try await engine.prepare(model: model) { progress($0 * 0.15) }
-            let coordinator = TranscriptCoordinator(speakerMode: speakerMode)
-            var duration: TimeInterval = 0
-            let totalFiles = files.values.reduce(0) { $0 + $1.count }
-            var finishedFiles = 0
-            for source in AudioSource.allCases {
-                guard let urls = files[source], !urls.isEmpty else { continue }
-                try Task.checkCancellation()
-                let session = try await engine.makeSession(source: source)
-                // File consumers need only the final result. Drain live updates
-                // so AsyncStream cannot retain every provisional revision.
-                let drain = Task { for await _ in session.updates {} }
-                do {
-                    var reader = AudioFilePCMReader(urls: urls, source: source)
-                    while let chunk = try await reader.next() {
-                        try Task.checkCancellation()
-                        if !chunk.samples.isEmpty {
-                            try await session.append(samples: chunk.samples, startTime: chunk.startTime)
-                        }
-                        let fileIndex = finishedFiles + chunk.finishedFiles
-                        progress(0.15 + 0.85 * (Double(fileIndex) + chunk.fileFraction) / Double(totalFiles))
-                    }
-                    finishedFiles += urls.count
-                    let final = try await session.finish()
-                    await drain.value
-                    for segment in final.segments { _ = await coordinator.ingest(.final(source: source, segment: segment)) }
-                    duration = max(duration, reader.duration)
-                } catch {
-                    await session.cancel()
-                    drain.cancel()
-                    throw error
-                }
-            }
-            try Task.checkCancellation()
-            let transcript = await coordinator.deduplicatedTranscript()
+            try await engine.prepare(model: model.descriptor) { progress($0 * 0.15) }
+            let result = try await decode(files: files, speakerMode: speakerMode) { progress(0.15 + $0 * 0.85) }
             await engine.unload()
-            return AudioFileTranscription(transcript: transcript, duration: duration)
+            return result
         } catch {
             await engine.unload()
             throw error
         }
+    }
+
+    private func decode(
+        files: [AudioSource: [URL]], speakerMode: SpeakerMode,
+        progress: @escaping @Sendable (Double) -> Void = { _ in }
+    ) async throws -> AudioFileTranscription {
+        let totalFiles = files.values.reduce(0) { $0 + $1.count }
+        guard totalFiles > 0 else { throw STTError.invalidAudio }
+        let coordinator = TranscriptCoordinator(speakerMode: speakerMode)
+        var duration: TimeInterval = 0
+        var finishedFiles = 0
+        for source in AudioSource.allCases {
+            guard let urls = files[source], !urls.isEmpty else { continue }
+            try Task.checkCancellation()
+            let session = try await engine.makeSession(source: source)
+            // File consumers need only the final result. Drain live updates
+            // so AsyncStream cannot retain every provisional revision.
+            let drain = Task { for await _ in session.updates {} }
+            do {
+                var reader = AudioFilePCMReader(urls: urls, source: source)
+                while let chunk = try await reader.next() {
+                    try Task.checkCancellation()
+                    if !chunk.samples.isEmpty {
+                        try await session.append(samples: chunk.samples, startTime: chunk.startTime)
+                    }
+                    let fileIndex = finishedFiles + chunk.finishedFiles
+                    progress((Double(fileIndex) + chunk.fileFraction) / Double(totalFiles))
+                }
+                finishedFiles += urls.count
+                let final = try await session.finish()
+                await drain.value
+                for segment in final.segments { _ = await coordinator.ingest(.final(source: source, segment: segment)) }
+                duration = max(duration, reader.duration)
+            } catch {
+                await session.cancel()
+                drain.cancel()
+                throw error
+            }
+        }
+        try Task.checkCancellation()
+        return await AudioFileTranscription(transcript: coordinator.deduplicatedTranscript(), duration: duration)
     }
 }

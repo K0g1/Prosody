@@ -1,6 +1,6 @@
 # Developing Prosody
 
-Use macOS 15 or later, Swift 6, and Xcode with its toolchain selected. Apple silicon is the tested configuration for Parakeet. SwiftPM resolves the pinned FluidAudio revision in [Package.resolved](../Package.resolved); downloaded model files stay outside the repository.
+Use macOS 15 or later, Swift 6, and Xcode with its toolchain selected. Apple silicon is the tested configuration for Parakeet. The app bundle uses Xcode’s App Intents extractor during staging. SwiftPM resolves the pinned FluidAudio revision in [Package.resolved](../Package.resolved); downloaded model files stay outside the repository.
 
 The coordinated beta rename uses `ProsodyCore`, `ProsodyApp`, and `ProsodyValidation`. Their source paths are `Sources/ProsodyCore`, `Sources/ProsodyApp`, and `Tools/ProsodyValidation`. New commands use `PROSODY_*` environment names; `CLIPPY_*` remains a compatibility alias. The bundle identifier remains `com.openai.clippy`, and `ClippyReleaseLabel` remains a compatibility plist key.
 
@@ -44,3 +44,11 @@ Use `PROSODY_DEMO_MODE=1` or `--demo` to seed sample sessions and isolate prefer
 When adding a Settings control, use the page's search metadata and a stable control identifier. Put a short explanation in contextual help if the control needs one. Check that the result opens the correct section and scrolls to the control. For appearance changes, verify contrast, light and dark appearance, and Reduce Transparency. Review the recorder, Settings, Transcripts, and dictation overlay.
 
 Keep source and documentation free of private sessions, credentials, raw logs, and local machine paths. Record release checks in the [validation guide](release-validation.md); publish only sanitized media.
+
+Run an isolated real model download, inference, and deletion check with
+`swift run ProsodyValidation --model-smoke MODEL_ID FIXTURE.aiff`. Use a generated
+audio file and one of `parakeet-unified`, `parakeet-v3`, or `fluid-speech-pro`.
+The command uses a temporary cache.
+
+The CLI and the app share the versioned transport in `Sources/ProsodyIPC`.
+Keep the help output and [CLI skill](skills/prosody-cli/SKILL.md) in sync when adding flags.

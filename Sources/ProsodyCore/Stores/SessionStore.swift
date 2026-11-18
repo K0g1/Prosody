@@ -33,6 +33,21 @@ public enum SessionAssetResolver {
             .filter(isPlayableFile)
     }
 
+    public static func allAudioTracks(in sessionDirectory: URL) -> [AudioSource: [URL]] {
+        var tracks: [AudioSource: [URL]] = [:]
+        let audioDirectory = sessionDirectory.appendingPathComponent("audio", isDirectory: true)
+        for source in AudioSource.allCases {
+            let directory = audioDirectory.appendingPathComponent(source.rawValue, isDirectory: true)
+            let urls = (try? FileManager.default.contentsOfDirectory(at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey], options: [.skipsHiddenFiles])) ?? []
+            let chunks = urls.filter(isPlayableFile).sorted { $0.path < $1.path }
+            let legacy = sessionDirectory.appendingPathComponent(source.rawValue + ".caf")
+            if !chunks.isEmpty { tracks[source] = chunks }
+            else if isPlayableFile(legacy) { tracks[source] = [legacy] }
+        }
+        return tracks
+    }
+
     public static func hasRetainedAudio(in sessionDirectory: URL) -> Bool {
         let fileManager = FileManager.default
         let audioDirectory = sessionDirectory.appendingPathComponent("audio", isDirectory: true)
@@ -98,7 +113,9 @@ public actor SessionStore {
                 try FileManager.default.removeItem(at: notesURL)
             }
         }
-        let manifest = SessionManifest(session: document.session)
+        var savedSession = document.session
+        savedSession.outputFolderPath = directory.path
+        let manifest = SessionManifest(session: savedSession)
         try AtomicFileWriter.encode(manifest, to: directory.appendingPathComponent("session.json"))
         let summary = makeSummary(manifest: manifest, directory: directory)
         do { try await indexStore.upsert(summary) }

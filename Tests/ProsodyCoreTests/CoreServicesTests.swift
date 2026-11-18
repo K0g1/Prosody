@@ -5,6 +5,176 @@ import XCTest
 
 final class CoreServicesTests: XCTestCase {
     @MainActor
+    func testBeta2PreferencesAndLabelsRemainCompatible() throws {
+        let suite = "Prosody-Beta2-Compatibility-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let oldValues: [String: Any] = [
+            "preferences.dictationShortcut": "Right Option",
+            "preferences.dictationActivation": "Press to start / stop",
+            "preferences.dictationOverlayAppearance": "Minimal",
+            "preferences.dictationInsertion": "Keyboard typing",
+            "preferences.copyDictationToClipboard": true,
+            "preferences.smartDictationCapitalization": false,
+            "preferences.theme": "glass",
+            "preferences.captureMode": "system",
+            "preferences.sttModel": "parakeet-unified",
+            "preferences.speakerMode": "full",
+            "preferences.notesProvider": "openai",
+            "preferences.notesModel": "legacy-model",
+            "preferences.outputFolder": "/tmp/Prosody legacy output",
+            "preferences.liveTranscription": false,
+            "preferences.keepAudio": true,
+            "preferences.globalShortcut": "⌃⌥R",
+            "preferences.localOnly": false,
+            "preferences.notifyWhenFinished": false,
+            "preferences.checkForUpdates": false
+        ]
+        for (key, value) in oldValues { defaults.set(value, forKey: key) }
+
+        let labelID = UUID()
+        let oldLabels: [[String: Any]] = [[
+            "id": labelID.uuidString,
+            "name": "Course",
+            "colorHex": "#336699",
+            "outputFolderPath": "/tmp/Prosody legacy label",
+            "namingPattern": "{date} - {title}",
+            "dateFormat": "yyyy-MM-dd"
+        ]]
+        defaults.set(try JSONSerialization.data(withJSONObject: oldLabels), forKey: "preferences.recordingLabels")
+
+        let restored = ProsodyPreferences(defaults: defaults)
+        XCTAssertEqual(restored.dictationShortcut, .rightOption)
+        XCTAssertEqual(restored.dictationActivation, .toggle)
+        XCTAssertEqual(restored.dictationOverlayAppearance, .minimal)
+        XCTAssertEqual(restored.dictationInsertionMethod, .typing)
+        XCTAssertTrue(restored.copyDictationToClipboard)
+        XCTAssertFalse(restored.smartDictationCapitalization)
+        XCTAssertEqual(restored.theme, .glass)
+        XCTAssertEqual(restored.captureMode, .system)
+        XCTAssertEqual(restored.sttModelID, SpeechModel.unified.rawValue)
+        XCTAssertEqual(restored.speakerMode, .full)
+        XCTAssertEqual(restored.notesProviderID, "openai")
+        XCTAssertEqual(restored.notesModelID, "legacy-model")
+        XCTAssertEqual(restored.outputFolderPath, "/tmp/Prosody legacy output")
+        XCTAssertFalse(restored.liveTranscription)
+        XCTAssertTrue(restored.keepAudio)
+        XCTAssertEqual(restored.globalShortcut, "⌃⌥R")
+        XCTAssertFalse(restored.localOnlyMode)
+        XCTAssertFalse(restored.notifyWhenFinished)
+        XCTAssertFalse(restored.checkForUpdates)
+        XCTAssertEqual(restored.recordingLabels.first?.id, labelID)
+        XCTAssertNil(restored.recordingLabels.first?.transcriptCopy)
+
+        // New preferences must use safe defaults without discarding Beta 2 values.
+        XCTAssertFalse(restored.omitFillerWords)
+        XCTAssertFalse(restored.cliEnabled)
+        XCTAssertTrue(restored.transcriptExport.title)
+        XCTAssertTrue(restored.transcriptCopyDestinations.isEmpty)
+    }
+
+    @MainActor
+    func testExplicitPreferenceImportKeepsOlderDomainAndMissingCurrentValues() throws {
+        let oldSuite = "Prosody-Previous-\(UUID())"
+        let newSuite = "Prosody-Current-\(UUID())"
+        let old = try XCTUnwrap(UserDefaults(suiteName: oldSuite))
+        let current = try XCTUnwrap(UserDefaults(suiteName: newSuite))
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID()).plist")
+        defer {
+            old.removePersistentDomain(forName: oldSuite)
+            current.removePersistentDomain(forName: newSuite)
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        let label = RecordingLabel(name: "Legacy label")
+        let archived: [String: Any] = [
+            "preferences.theme": "amber-glass",
+            "preferences.dictationShortcut": "Right Option",
+            "preferences.outputFolder": "/tmp/Prosody-Legacy",
+            "preferences.recordingLabels": try JSONEncoder().encode([label]),
+            "preferences.recordingDestinations": try JSONEncoder().encode([
+                RecordingDestination(path: "/tmp/Prosody-Previous-Label"),
+                RecordingDestination(path: "/tmp/Prosody-Shared-Label")
+            ]),
+            "preferences.selectedRecordingLabels": [label.id.uuidString, UUID().uuidString],
+            "preferences.transcriptExport": Data(#"{"timestamps":false}"#.utf8),
+            "preferences.cliEnabled": true,
+            "preferences.cliInstalledTarget": "/tmp/untrusted-link",
+            "preferences.launchAtLogin": true,
+            "preferences.sttModel": "unknown-model",
+            TranscriptSegmentationConfiguration.maximumWordsDefaultsKey: 22,
+            "SUFeedURL": "https://example.com/untrusted.xml"
+        ]
+        old.setPersistentDomain(archived, forName: oldSuite)
+        let bytes = try PropertyListSerialization.data(fromPropertyList: archived, format: .binary, options: 0)
+        try bytes.write(to: url)
+
+        let preferences = ProsodyPreferences(defaults: current)
+        XCTAssertEqual(preferences.theme, .graphite)
+        XCTAssertEqual(preferences.dictationShortcut, .rightCommand)
+        preferences.omitFillerWords = true
+        preferences.outputFolderPath = "/tmp/Prosody-Current"
+        preferences.outputFolderBookmarkData = Data([1, 2])
+        preferences.recordingDestinations = [
+            RecordingDestination(path: "/tmp/Prosody-New-Label"),
+            RecordingDestination(path: "/tmp/Prosody-Shared-Label", bookmarkData: Data([3]))
+        ]
+        XCTAssertEqual(try preferences.importSettings(.file(url)), 8)
+        XCTAssertEqual(preferences.theme, .amberGlass)
+        XCTAssertEqual(preferences.dictationShortcut, .rightOption)
+        XCTAssertEqual(preferences.recordingLabels, [label])
+        XCTAssertEqual(preferences.selectedRecordingLabelIDs, [label.id])
+        XCTAssertEqual(preferences.outputFolderPath, "/tmp/Prosody-Legacy")
+        XCTAssertNil(preferences.outputFolderBookmarkData)
+        XCTAssertEqual(preferences.recordingDestinations, [
+            RecordingDestination(path: "/tmp/Prosody-New-Label"),
+            RecordingDestination(path: "/tmp/Prosody-Shared-Label", bookmarkData: Data([3])),
+            RecordingDestination(path: "/tmp/Prosody-Previous-Label"),
+            RecordingDestination(path: "/tmp/Prosody-Current", bookmarkData: Data([1, 2]))
+        ])
+        XCTAssertEqual(preferences.transcriptSegmentationConfiguration.maximumWordsPerSegment, 22)
+        XCTAssertEqual(preferences.transcriptSegmentationConfiguration.pauseThreshold, 1.5)
+        XCTAssertFalse(preferences.transcriptExport.timestamps)
+        XCTAssertTrue(preferences.transcriptExport.title)
+        XCTAssertTrue(preferences.omitFillerWords)
+        XCTAssertFalse(preferences.cliEnabled)
+        XCTAssertNil(preferences.cliInstalledTarget)
+        XCTAssertFalse(preferences.launchAtLogin)
+        XCTAssertNil(current.object(forKey: "SUFeedURL"))
+        XCTAssertEqual(preferences.sttModelID, SpeechModel.unified.rawValue)
+
+        old.set("graphite", forKey: "preferences.theme")
+        XCTAssertEqual(ProsodyPreferences(defaults: current).theme, .amberGlass)
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+        XCTAssertThrowsError(try preferences.importSettings(.init(title: "Invalid", values: [
+            "preferences.theme": "future-theme",
+            "preferences.recordingLabels": Data("invalid".utf8)
+        ])))
+        XCTAssertEqual(preferences.recordingLabels, [label])
+    }
+
+    @MainActor
+    func testSandboxPreferenceImportFindsPreviousDefaultOutput() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Clippy")
+        let settings = root.appendingPathComponent("Library/Preferences")
+        for directory in [folder, settings] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        let url = settings.appendingPathComponent("\(AppConstants.bundleIdentifier).plist")
+        let bytes = try PropertyListSerialization.data(
+            fromPropertyList: ["preferences.outputFolder": "~/Clippy", "preferences.theme": "glass"],
+            format: .xml, options: 0
+        )
+        try bytes.write(to: url)
+        let archive = try PreferenceArchive.sandboxInstallation(in: root)
+        XCTAssertEqual(archive.values["preferences.outputFolder"] as? String, folder.path)
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+    }
+
+    @MainActor
     func testMainScreenAndTranscriptPreferencesSurviveRelaunch() {
         let suite = "Prosody-Settings-Tests-\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!

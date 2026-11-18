@@ -79,6 +79,7 @@ actor DictationGate {
 
 struct DictationPreferencesSnapshot: Sendable {
     var segmentationConfiguration = TranscriptSegmentationConfiguration()
+    var omitFillerWords = false
     var replacements = WordReplacementProcessor(rules: [])
     var copyToClipboard = false
     var insertionMethod: DictationInsertionMethod = .paste
@@ -139,8 +140,7 @@ public final class DictationController: ObservableObject {
             },
             copyText: @escaping @MainActor (String) -> Void = { DictationTextDestination.copy($0) },
             canPrewarmRecognition: @escaping @MainActor () -> Bool = {
-                AXIsProcessTrusted()
-                    && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+                AXIsProcessTrusted() && MicrophonePermission.isGranted
             },
             preserveFailedDictation: @escaping @MainActor (TimeInterval, AudioArchiveWriter) async throws -> Bool = { _, _ in false }
         ) {
@@ -188,6 +188,7 @@ public final class DictationController: ObservableObject {
     @Published public private(set) var message = ""
     @Published public private(set) var resultText = ""
     @Published public private(set) var shortcutReady = false
+    @Published private(set) var accessibilityGranted = false
     #if DEBUG
     @Published private(set) var validationReport = ""
     @Published var validationPreviewOnly = false
@@ -195,7 +196,7 @@ public final class DictationController: ObservableObject {
 
     private weak var model: AppModel?
     private let dependencies: Dependencies
-    private let recognizer: DictationRecognizer
+    private var recognizer: DictationRecognizer
     private let captureGate = DictationGate()
     private let recognitionGate = DictationGate()
     private var monitor: (any DictationShortcutMonitoring)?
@@ -216,17 +217,18 @@ public final class DictationController: ObservableObject {
 
     init(model: AppModel) {
         self.model = model
-        let recognizer = DictationRecognizer()
+        let recognizer = Self.makeRecognizer(for: model.selectedSpeechModel, inventory: model.modelManager)
         self.recognizer = recognizer
         dependencies = Dependencies(
             canStart: { [weak model] in
                 guard let model else { return false }
-                return !model.recordingState.isRecording && !model.recordingState.isBusy && !model.isTransitioning
+                return !model.recordingState.isRecording && !model.recordingState.isBusy && !model.isTransitioning && !model.isImportingAudio
             },
             preferences: { [weak model] in
                 guard let model else { return .init() }
                 return DictationPreferencesSnapshot(
                     segmentationConfiguration: model.preferences.transcriptSegmentationConfiguration,
+                    omitFillerWords: model.preferences.omitFillerWords,
                     replacements: WordReplacementProcessor(rules: model.preferences.wordReplacements),
                     copyToClipboard: model.preferences.copyDictationToClipboard,
                     insertionMethod: model.preferences.dictationInsertionMethod,
@@ -257,6 +259,20 @@ public final class DictationController: ObservableObject {
         recognizer = dependencies.recognizer
     }
 
+    private static func makeRecognizer(for model: SpeechModel, inventory: STTModelManager) -> DictationRecognizer {
+        DictationRecognizer(idleRetention: DictationRecognizer.defaultIdleRetention) {
+            try await ParakeetDictationModel.loadInstalled(model, inventory: inventory)
+        }
+    }
+
+    var canChangeRecognitionModel: Bool { allSessions.isEmpty && !hasPendingCleanup }
+
+    func selectRecognitionModel(_ model: SpeechModel, inventory: STTModelManager) async {
+        let previous = recognizer
+        recognizer = Self.makeRecognizer(for: model, inventory: inventory)
+        await previous.releaseAndWaitIfIdle()
+    }
+
     public var isActive: Bool { state.isActive }
     var hasPendingCleanup: Bool { cleanupInFlight > 0 }
     public var canFinish: Bool {
@@ -271,6 +287,7 @@ public final class DictationController: ObservableObject {
             activation: dependencies.activation(),
             trusted: dependencies.accessibilityTrusted()
         )
+        if accessibilityGranted != desired.trusted { accessibilityGranted = desired.trusted }
         if desired.trusted, monitor != nil, shortcutReady,
            appliedShortcutConfiguration == desired {
             pendingShortcutConfiguration = nil
@@ -438,7 +455,7 @@ public final class DictationController: ObservableObject {
     /// app calls this after launch; a new gesture calls it again before the
     /// microphone starts when permission was not already granted.
     public func prewarmRecognition() {
-        guard captureSession == nil, finalizationTask == nil, finalizingSession == nil,
+        guard model?.canBrowseSessions != false, captureSession == nil, finalizationTask == nil, finalizingSession == nil,
               releasedSessions.isEmpty,
               !allSessions.contains(where: { $0.pipeline != nil || $0.isCommitted }) else { return }
         startPrewarmIfAuthorized()
@@ -448,6 +465,15 @@ public final class DictationController: ObservableObject {
         await recognizer.modelPreparationUpdates()
     }
 
+    func transcribeFileWithCachedModel(_ url: URL, configuration: TranscriptSegmentationConfiguration,
+                                       scope: UUID) async throws -> AudioFileTranscription {
+        try await recognizer.replayArchive([url], configuration: configuration, scope: scope)
+    }
+
+    func finishExternalTranscription(_ scope: UUID) async {
+        await recognizer.finishScope(scope)
+    }
+
     func releaseCachedModel() async {
         await recognizer.releaseIfIdle()
         // A regular recording must not open the microphone while a cancelled
@@ -455,6 +481,7 @@ public final class DictationController: ObservableObject {
         // idle synchronously; only the hardware handoff waits here.
         guard await captureGate.acquire() else { return }
         await captureGate.release()
+        if canChangeRecognitionModel { await recognizer.releaseAndWaitIfIdle() }
     }
 
     @discardableResult
@@ -534,11 +561,12 @@ public final class DictationController: ObservableObject {
             try Task.checkCancellation()
             guard !session.cancelRequested else { throw CancellationError() }
             session.destination = dependencies.resolveDestination(session.frontmost)
+            if session.destination == nil { AppLogger.dictationLatency.debug("No eligible destination at dictation start") }
             #if DEBUG
             let fixture = validationAudioURL
             let microphoneFixture = validationMicrophoneURL
             let useMicrophone = fixture == nil
-            if microphoneFixture != nil, AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
+            if microphoneFixture != nil, !MicrophonePermission.isGranted {
                 throw UserFacingError(title: "Microphone fixture unavailable",
                                       message: "This test requires an existing microphone grant.")
             }
@@ -864,7 +892,9 @@ public final class DictationController: ObservableObject {
                 return
             }
             try checkCancellation(session)
-            let transcript = session.preferences.replacements.apply(to: result.audio.transcript)
+            let recognized = result.audio.transcript
+            let cleaned = session.preferences.omitFillerWords ? FillerWordFilter().apply(to: recognized) : recognized
+            let transcript = session.preferences.replacements.apply(to: cleaned)
             let text = transcript.visibleSegments.map(\.text).joined(separator: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else {
@@ -1222,12 +1252,7 @@ public final class DictationController: ObservableObject {
     }
 
     private static func requireMicrophonePermission() async throws {
-        let granted: Bool
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: granted = true
-        case .notDetermined: granted = await AVCaptureDevice.requestAccess(for: .audio)
-        default: granted = false
-        }
+        let granted = await MicrophonePermission.requestIfNeeded()
         try Task.checkCancellation()
         guard granted else {
             throw UserFacingError(title: "Microphone required", message: "Allow Prosody in System Settings → Privacy & Security → Microphone.")

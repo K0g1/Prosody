@@ -48,6 +48,7 @@ public struct SessionManifest: Codable, Equatable, Sendable {
     public let outputFolderPath: String?
     /// Nil in manifests written before source kinds were persisted.
     public let sourceKind: String?
+    public let originalAudioFileName: String?
 
     public init(
         schemaVersion: Int = 1,
@@ -65,7 +66,8 @@ public struct SessionManifest: Codable, Equatable, Sendable {
         labels: [RecordingLabelSnapshot]? = nil,
         destinationRootPath: String? = nil,
         transcriptFileName: String? = nil,
-        sourceKind: String? = nil
+        sourceKind: String? = nil,
+        originalAudioFileName: String? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.id = id
@@ -83,6 +85,7 @@ public struct SessionManifest: Codable, Equatable, Sendable {
         self.destinationRootPath = destinationRootPath
         self.transcriptFileName = transcriptFileName
         self.sourceKind = sourceKind
+        self.originalAudioFileName = originalAudioFileName
     }
 
     public init(session: RecordingSession) {
@@ -108,7 +111,8 @@ public struct SessionManifest: Codable, Equatable, Sendable {
             labels: session.labels,
             destinationRootPath: session.destinationRootPath,
             transcriptFileName: session.transcriptFileName,
-            sourceKind: session.sourceKind
+            sourceKind: session.sourceKind,
+            originalAudioFileName: session.originalAudioFileName
         )
     }
 
@@ -133,6 +137,7 @@ public struct SessionManifest: Codable, Equatable, Sendable {
             transcriptFileName: transcriptFileName
         )
         session.sourceKind = sourceKind
+        session.originalAudioFileName = originalAudioFileName
         return session
     }
 }

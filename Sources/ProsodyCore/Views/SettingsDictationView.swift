@@ -5,6 +5,8 @@ struct DictationSettingsView: GroupedSettingsSearchPage {
     @Environment(\.prosodyPalette) private var palette
     @ObservedObject var preferences: ProsodyPreferences
     @ObservedObject var controller: DictationController
+    @State private var microphoneGranted = MicrophonePermission.isGranted
+    @State private var requestingMicrophone = false
     #if DEBUG
     @State private var validationApplication = "com.apple.TextEdit"
     #endif
@@ -53,13 +55,13 @@ struct DictationSettingsView: GroupedSettingsSearchPage {
               keywords: ["capitalization", "sentence case", "caret context", "punctuation"],
               context: "Best effort in apps that expose caret context.") { pane, entry in
             Toggle(entry.title, isOn: pane.$preferences.smartDictationCapitalization)
-                .labelsHidden().toggleStyle(.switch)
+                .labelsHidden().toggleStyle(.prosodySwitch)
                 .accessibilityIdentifier(entry.id)
         },
         .init("clippy.settings.dictation.clipboard", "Copy output to clipboard",
               keywords: ["copy dictation text"]) { pane, entry in
             Toggle(entry.title, isOn: pane.$preferences.copyDictationToClipboard)
-                .labelsHidden().toggleStyle(.switch)
+                .labelsHidden().toggleStyle(.prosodySwitch)
                 .accessibilityIdentifier(entry.id)
         }
     ])
@@ -67,15 +69,32 @@ struct DictationSettingsView: GroupedSettingsSearchPage {
     private static let permissions = SettingsControlGroup<Self>("Permissions", controls: [
         .init("clippy.settings.dictation.permission", "Accessibility",
               keywords: ["enable permission", "microphone", "system settings"],
-              context: "Required for the global shortcut and text insertion. Microphone access is requested on first use.") { pane, entry in
+              context: "Required for the global shortcut and text insertion. After changing app versions, macOS may need a new grant for this copy of Prosody.") { pane, entry in
             HStack(spacing: 8) {
                 if pane.controller.shortcutReady {
-                    Text("Enabled").font(.caption).foregroundStyle(.secondary)
+                    Text("Shortcut ready").font(.caption).foregroundStyle(.secondary)
+                } else if pane.controller.accessibilityGranted {
+                    Text("Shortcut unavailable").font(.caption).foregroundStyle(.secondary)
                 }
                 Button(pane.controller.shortcutReady ? "Check Again" : "Enable…") {
                     pane.enableAccessibility()
                 }
                 .accessibilityLabel(pane.controller.shortcutReady ? "Check Accessibility Again" : "Enable Accessibility")
+                .accessibilityIdentifier(entry.id)
+            }
+        },
+        .init("clippy.settings.dictation.microphone", "Microphone",
+              keywords: ["enable permission", "microphone", "system settings"],
+              context: "Required for dictation, regardless of the recording source selected in Audio.") { pane, entry in
+            if pane.microphoneGranted {
+                Label("Allowed", systemImage: "checkmark")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Button(pane.requestingMicrophone ? "Requesting…" : "Allow Microphone…") {
+                    pane.enableMicrophone()
+                }
+                .disabled(pane.requestingMicrophone)
                 .accessibilityIdentifier(entry.id)
             }
         }
@@ -104,6 +123,9 @@ struct DictationSettingsView: GroupedSettingsSearchPage {
         .onChange(of: preferences.dictationShortcut) { _, _ in controller.configureShortcut() }
         .onChange(of: preferences.dictationActivation) { _, _ in controller.configureShortcut() }
         .onAppear { controller.configureShortcut() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            microphoneGranted = MicrophonePermission.isGranted
+        }
     }
 
     #if DEBUG
@@ -126,6 +148,18 @@ struct DictationSettingsView: GroupedSettingsSearchPage {
         if !controller.shortcutReady,
            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func enableMicrophone() {
+        requestingMicrophone = true
+        Task { @MainActor in
+            microphoneGranted = await MicrophonePermission.requestIfNeeded()
+            requestingMicrophone = false
+            if !microphoneGranted,
+               let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 }

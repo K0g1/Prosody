@@ -61,7 +61,8 @@ extension ProsodyValidation {
             "verdigris", "glass"
         ]
         let expectedThemeIDs = legacyThemeIDs.union([
-            "smoked-glass", "sea-glass", "cloud", "chalk", "canvas", "slate", "stone", "fog",
+            "smoked-glass", "sea-glass", "clear-glass", "amber-glass", "iris-glass", "rose-glass",
+            "cloud", "chalk", "canvas", "slate", "stone", "fog",
             "oled-true-black", "cobalt-ink", "navy-ink", "carbon-cyan", "ink-violet", "deep-navy",
             "royal-ink", "midnight-cyan", "ink-plum", "coastal-fog", "kelp", "moss", "fern",
             "rainforest", "glacier", "harbor", "lagoon", "driftwood", "evergreen", "risograph-red",
@@ -70,10 +71,10 @@ extension ProsodyValidation {
             "arcade", "laser-pink", "nightwatch", "beacon", "starlight", "basalt", "granite", "quartz",
             "clay", "ochre", "umber", "jade", "sandstone", "moss-agate"
         ])
-        precondition(ProsodyTheme.allCases.count == 91)
+        precondition(ProsodyTheme.allCases.count == 95)
         precondition(Set(ProsodyTheme.allCases.map(\.id)) == expectedThemeIDs)
         precondition(legacyThemeIDs.isSubset(of: Set(ProsodyTheme.allCases.map(\.id))))
-        precondition(ProsodyTheme.allCases.filter { $0.isAdaptive } == [.glass])
+        precondition(ProsodyTheme.allCases.filter { $0.isAdaptive } == [.glass, .clearGlass, .amberGlass, .irisGlass, .roseGlass])
         for theme in ProsodyTheme.allCases {
             let light = theme.palette(for: .light)
             let dark = theme.palette(for: .dark)
@@ -97,7 +98,7 @@ extension ProsodyValidation {
                 }
             }
         }
-        print("Presentation regressions: PASS (91 theme contrast palettes with the 36-theme legacy set, raw copy, trailing space, waveform bounds)")
+        print("Presentation regressions: PASS (95 theme contrast palettes with the 36-theme legacy set, raw copy, trailing space, waveform bounds)")
     }
 
     private static func contrast(_ first: UInt32, _ second: UInt32) -> Double {

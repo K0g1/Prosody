@@ -8,6 +8,7 @@ final class RecordingLabelDraftStore {
     var selectedID: UUID?
     var drafts: [UUID: RecordingLabel] = [:]
     var bookmarks: [UUID: Data] = [:]
+    var transcriptBookmarks: [UUID: Data] = [:]
     var newLabelIDs: Set<UUID> = []
     var newLabelOrder: [UUID] = []
     var selectionBeforeNew: UUID?

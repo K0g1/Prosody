@@ -29,6 +29,10 @@ public final class GlobalHotkeyManager: @unchecked Sendable {
     private var handlerRef: EventHandlerRef?
     private let callback: @MainActor @Sendable () -> Void
 
+    static func supports(_ shortcut: String) -> Bool {
+        (try? ShortcutParser.parse(shortcut)) != nil
+    }
+
     public init(
         shortcut: String,
         callback: @escaping @MainActor @Sendable () -> Void

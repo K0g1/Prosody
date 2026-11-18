@@ -51,7 +51,7 @@
 
       <article class="guide-handbook">
         <header class="guide-hero">
-          <p class="guide-eyebrow">Beta 2 · macOS 15 or later · Apple silicon</p>
+          <p class="guide-eyebrow">Beta 3 · macOS 15 or later · Apple silicon</p>
           <h1>Prosody handbook</h1>
           <p class="guide-lede">Record system audio or your microphone, transcribe on your Mac, dictate into the app you are already using, and keep searchable Markdown transcripts.</p>
           <p class="guide-note">Press <kbd>⌘F</kbd> in your browser to find a feature or setting on this page. Try “Include Dictation,” “primary label,” or “Accessibility.”</p>
@@ -86,9 +86,9 @@
 
         <section class="guide-section" id="install" aria-labelledby="install-title">
           <h2 id="install-title">Build and source</h2>
-          <p>Prosody requires macOS 15 or later and Apple silicon. Download the Beta 2 disk image and checksum from <a href="https://github.com/K0g1/Prosody/releases/tag/v1.2.0-beta.2">GitHub Releases</a>.</p>
+          <p>Prosody requires macOS 15 or later and Apple silicon. Download the Beta 3 disk image and checksum from <a href="https://github.com/K0g1/Prosody/releases">GitHub Releases</a>.</p>
           <h3 id="install-steps">Install</h3>
-          <ol class="guide-steps"><li>Verify the checksum with <code>shasum -a 256 -c Prosody-1.2.0-beta.2.dmg.sha256</code>.</li><li>Open the disk image and drag <strong>Prosody</strong> to <strong>Applications</strong>.</li><li>If macOS blocks the first launch, choose <strong>Open</strong> from the Finder context menu or allow Prosody in <strong>System Settings → Privacy &amp; Security</strong>.</li></ol>
+          <ol class="guide-steps"><li>Verify the checksum with <code>shasum -a 256 -c Prosody-1.2.0-beta.3.dmg.sha256</code>.</li><li>Open the disk image and drag <strong>Prosody</strong> to <strong>Applications</strong>.</li><li>If macOS blocks the first launch, choose <strong>Open</strong> from the Finder context menu or allow Prosody in <strong>System Settings → Privacy &amp; Security</strong>.</li></ol>
           <h3 id="upgrade">Upgrade notes</h3>
           <p>The public beta keeps the `com.openai.clippy` bundle identifier so existing data is found. Its ad-hoc signature differs from earlier privately signed builds, so macOS may request capture and Accessibility permission again.</p>
         </section>
@@ -180,7 +180,7 @@
             </div>
             <div class="guide-card">
               <h3>Right-click or Control-click</h3>
-              <p>Open the quick menu for <strong>Show Prosody</strong>, <strong>Browse Transcripts…</strong>, <strong>Transcribe Audio File…</strong>, recording controls, <strong>Settings…</strong>, and <strong>Quit Prosody</strong>.</p>
+              <p>Open the quick menu for <strong>Show Prosody</strong>, <strong>Browse Transcripts…</strong>, <strong>Transcribe Audio Files…</strong>, recording controls, <strong>Settings…</strong>, and <strong>Quit Prosody</strong>.</p>
             </div>
           </div>
 
@@ -346,7 +346,7 @@
           <p>The timeline shows where speech occurs, skips duplicate echo text, and leaves trailing silence blank after the last visible speech time. Long sessions load audio as needed for playback, and the skip controls move five seconds. Closing the transcript window stops playback. A session without retained audio, or with missing audio files, stays readable and searchable and shows an explicit unavailable-audio state.</p>
 
           <h3 id="import-audio">Transcribe an audio file</h3>
-          <p>Choose <strong>Transcripts</strong> → <strong>Transcribe Audio File…</strong>, select one file, and click <strong>Transcribe</strong>. Common formats include MP3, WAV, M4A, CAF, AIFF, and FLAC. Enable <strong>Settings</strong> → <strong>Audio</strong> → <strong>Keep original audio</strong> before importing if you want a playable copy saved with the transcript.</p>
+          <p>Choose <strong>File</strong> → <strong>Transcribe Audio Files…</strong>, select one or more files, and click <strong>Transcribe</strong>. Choose an optional label and filename preference in the file panel. Common formats include MP3, WAV, M4A, CAF, AIFF, and FLAC. Enable <strong>Settings</strong> → <strong>Audio</strong> → <strong>Keep original audio</strong> before importing if you want a playable copy saved with the transcript.</p>
 
           <h3 id="recovery">Recover an unfinished recording</h3>
           <p>Prosody writes a recovery journal and temporary audio while recording. If the app or Mac stops unexpectedly, the next launch can show an <strong>Unfinished recording</strong> notice in the recorder.</p>
@@ -399,7 +399,7 @@
           <p class="guide-kicker">Look and feel</p>
           <h2 id="appearance-title">Appearance</h2>
           <p>Open <strong>Settings</strong> → <strong>Appearance</strong>. Themes apply to the recorder, Settings, Transcripts, sheets, popovers, and dictation overlay. The menu bar and Dock icons stay monochrome. <strong>Graphite</strong> is the default.</p>
-          <p>Prosody includes 91 themes across seven groups. In <strong>Appearance</strong>, click a swatch to apply it.</p>
+          <p>Prosody includes 95 themes across seven groups. In <strong>Appearance</strong>, choose a tinted glass palette, untinted <strong>Clear Glass</strong>, or a solid theme.</p>
           <div class="guide-grid guide-grid-three">
             <div class="guide-card"><h3>System &amp; Glass</h3><p>Frosted Glass, Smoked Glass, and Sea Glass. Frosted Glass follows the system light or dark appearance.</p></div>
             <div class="guide-card"><h3>Essentials</h3><p>Graphite, Pearl, Linen, Daybreak, Cloud, Chalk, Canvas, Slate, Stone, and Fog.</p></div>
@@ -532,10 +532,10 @@
         <section class="guide-section" id="models" aria-labelledby="models-title">
           <p class="guide-kicker">Speech model</p>
           <h2 id="models-title">Model availability</h2>
-          <p>The current <strong>Models</strong> page offers <strong>Parakeet Unified</strong> for English. It supports streaming and word timestamps and is about 565 MB. Download it once with an internet connection; recognition then runs locally.</p>
+          <p>The <strong>Models</strong> page offers <strong>Parakeet Unified</strong> for English live transcription and <strong>Parakeet TDT v3</strong> or <strong>Fluid Speech Pro</strong> for multilingual batch transcription. Each model downloads on demand and runs locally.</p>
           <ul class="guide-list">
             <li>A distributed build contains no model weights. The app downloads the model after installation.</li>
-            <li>Once installed, Parakeet Unified is marked <strong>Selected</strong>. The Models page does not offer a remove button for the selected model.</li>
+            <li>Select any installed model. Use <strong>Open Models Folder</strong> to inspect the cache, or the Delete button to remove a model after confirmation.</li>
             <li>If a download is interrupted, choose <strong>Download</strong> again. Check free disk space and the network connection if it fails repeatedly.</li>
             <li>Deferred transcription, imports, and dictation use the same local speech model.</li>
             <li>Full speaker separation may need a separate model download. If it is unavailable, Prosody keeps source labels.</li>

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>ClippyReleaseLabel</key>
-	<string>1.2.0-beta.2</string>
+	<string>1.2.0-beta.3</string>
 	<key>CFBundleDisplayName</key>
 	<string>Prosody</string>
 	<key>CFBundleExecutable</key>
@@ -19,7 +19,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>13</string>
+	<string>15</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>LSUIElement</key>
@@ -34,5 +34,17 @@
 	<string>Prosody captures system audio so it can transcribe meetings, videos, and lectures.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Prosody captures audio playing on your Mac so it can create transcripts.</string>
+	<key>SUFeedURL</key>
+	<string>https://k0g1.github.io/Prosody/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>npXmPhiXNmWR+YFr7kJbQca8TGn3khZhHh9zbMy3rFM=</string>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>SUAllowsAutomaticUpdates</key>
+	<false/>
 </dict>
 </plist>

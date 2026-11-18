@@ -6,7 +6,7 @@ import SwiftUI
 /// status item with distinct mouse actions, and a nonactivating dictation HUD.
 /// All content and recording state remain in SwiftUI/AppModel.
 @MainActor
-public final class AppWindowController: NSObject, NSWindowDelegate {
+public final class AppWindowController: NSObject, NSWindowDelegate, NSMenuItemValidation {
     public static let shared = AppWindowController()
     private var windows: [String: NSWindow] = [:]
     private var statusItem: NSStatusItem?
@@ -63,6 +63,11 @@ public final class AppWindowController: NSObject, NSWindowDelegate {
         model.dictation.configureShortcut()
     }
 
+    func showDictationSettings() {
+        showSettings()
+        model.requestedSettingsSection = .dictation
+    }
+
     public func showLibrary() {
         present(id: "library", title: "\(AppConstants.applicationName) Transcripts", size: NSSize(width: 1160, height: 740),
             minimum: NSSize(width: 1020, height: 600), view: TranscriptLibraryView(model: model), integratedChrome: true)
@@ -70,6 +75,7 @@ public final class AppWindowController: NSObject, NSWindowDelegate {
 
     public func showRecordingControls() {
         guard let button = statusItem?.button, !popover.isShown else { return }
+        model.dictation.configureShortcut()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
@@ -137,6 +143,11 @@ public final class AppWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    public func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        guard window.identifier?.rawValue == "clippy.library", model.canBrowseSessions else { return nil }
+        return model.transcriptUndoManager
+    }
+
     public func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow else { return }
         // A minimized window still needs the Dock so it can be restored.
@@ -155,13 +166,15 @@ public final class AppWindowController: NSObject, NSWindowDelegate {
                 add("Show Debug Recorder", action: #selector(debugRecorderAction), to: menu)
             }
             add("Browse Transcripts…", action: #selector(libraryAction), to: menu)
-            add("Transcribe Audio File…", action: #selector(importAction), to: menu, enabled: model.canBrowseSessions)
+            add("Transcribe Audio Files…", action: #selector(importAction), to: menu, enabled: model.canBrowseSessions)
             menu.addItem(.separator())
             add(model.recordingState == .paused ? "Resume Recording" : model.recordingState == .recording ? "Pause Recording" : "Start Recording",
                 action: #selector(toggleAction), to: menu, enabled: model.canToggleRecording)
             add("Finish Recording", action: #selector(finishAction), to: menu, enabled: model.canFinishRecording)
             menu.addItem(.separator())
             add("Settings…", action: #selector(settingsAction), to: menu)
+            add("Check for Updates…", action: #selector(checkForUpdatesAction), to: menu,
+                enabled: model.softwareUpdates.canCheck && model.canRelaunchForUpdate)
             add("Quit \(AppConstants.applicationName)", action: #selector(quitAction), to: menu)
             if let event = NSApp.currentEvent {
                 // Pop the menu directly from the original right-click event.
@@ -211,46 +224,130 @@ public final class AppWindowController: NSObject, NSWindowDelegate {
 
     private func installMainMenu() {
         let root = NSMenu()
-        let application = NSMenuItem()
-        root.addItem(application)
-        let menu = NSMenu(title: AppConstants.applicationName)
-        application.submenu = menu
-        add("About \(AppConstants.applicationName)", action: #selector(aboutAction), to: menu)
-        menu.addItem(.separator())
-        add("Settings…", action: #selector(settingsAction), to: menu, key: ",")
-        add("Browse Transcripts…", action: #selector(libraryAction), to: menu, key: "l")
-        add("Transcribe Audio File…", action: #selector(importAction), to: menu, key: "o")
-        add("Show \(AppConstants.applicationName)", action: #selector(recordingControlsAction), to: menu, key: "0")
-        if debugControlsEnabled {
-            add("Show Debug Recorder", action: #selector(debugRecorderAction), to: menu)
+        func submenu(_ title: String) -> NSMenu {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let menu = NSMenu(title: title)
+            item.submenu = menu
+            root.addItem(item)
+            return menu
         }
-        menu.addItem(.separator())
-        add("Quit \(AppConstants.applicationName)", action: #selector(quitAction), to: menu, key: "q")
-        let edit = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
-        edit.submenu = NSMenu(title: "Edit")
-        for (title, action, key) in [("Undo", "undo:", "z"), ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] {
-            edit.submenu?.addItem(withTitle: title, action: Selector(action), keyEquivalent: key)
-        }
-        root.addItem(edit)
 
-        let viewMenu = NSMenu(title: "View")
-        let fullScreen = viewMenu.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        let application = submenu(AppConstants.applicationName)
+        command("About Prosody", #selector(aboutAction), in: application)
+        command("Check for Updates…", #selector(checkForUpdatesAction), in: application)
+        application.addItem(.separator())
+        command("Settings…", #selector(settingsAction), in: application, key: ",")
+        application.addItem(.separator())
+        command("Quit Prosody", #selector(quitAction), in: application, key: "q")
+
+        let file = submenu("File")
+        command("New Recording", #selector(startRecordingAction), in: file, key: "n")
+        command("Pause Recording", #selector(pauseResumeAction), in: file)
+        command("Finish Recording", #selector(finishAction), in: file)
+        file.addItem(.separator())
+        command("Transcribe Audio Files…", #selector(importAction), in: file, key: "o")
+        let export = NSMenu(title: "Export Transcripts")
+        let exportItem = file.addItem(withTitle: "Export Transcripts", action: nil, keyEquivalent: "")
+        exportItem.submenu = export
+        command("Separate Markdown Files…", #selector(exportSeparateAction), in: export)
+        command("Combined Markdown File…", #selector(exportCombinedAction), in: export)
+        command("Retained Audio…", #selector(exportAudioAction), in: export)
+        command("Compress Retained Audio…", #selector(compressAudioAction), in: file)
+        command("Reveal Transcript in Finder", #selector(revealTranscriptAction), in: file)
+        file.addItem(.separator())
+        command("Open Notes", #selector(openNotesAction), in: file)
+        command("Regenerate Notes", #selector(regenerateNotesAction), in: file)
+        file.addItem(.separator())
+        file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+
+        let edit = submenu("Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        for (title, action, key) in [
+            ("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"),
+            ("Delete", "delete:", ""), ("Select All", "selectAll:", "a")
+        ] {
+            edit.addItem(withTitle: title, action: Selector(action), keyEquivalent: key)
+        }
+        edit.addItem(.separator())
+        command("Copy Transcript Text", #selector(copyRawAction), in: edit, key: "c", modifiers: [.command, .shift])
+        command("Copy Transcript Markdown", #selector(copyMarkdownAction), in: edit, key: "c", modifiers: [.command, .option])
+        command("Find in Library", #selector(findAction), in: edit, key: "f")
+
+        let view = submenu("View")
+        command("Show Recorder", #selector(recordingControlsAction), in: view, key: "0")
+        command("Browse Transcripts", #selector(libraryAction), in: view, key: "l")
+        command("Hide Library Sidebar", #selector(toggleSidebarAction), in: view, key: "s", modifiers: [.command, .control])
+        if debugControlsEnabled { command("Show Debug Recorder", #selector(debugRecorderAction), in: view) }
+        view.addItem(.separator())
+        let fullScreen = view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fullScreen.keyEquivalentModifierMask = [.control, .command]
-        let viewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
-        viewItem.submenu = viewMenu
-        root.addItem(viewItem)
 
-        let windowMenu = NSMenu(title: "Window")
-        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        let windowMenu = submenu("Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         windowMenu.addItem(.separator())
+        command("Recording Controls", #selector(recordingControlsAction), in: windowMenu)
+        command("Transcripts", #selector(libraryAction), in: windowMenu)
+        command("Settings", #selector(settingsAction), in: windowMenu)
+        windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
-        let windowItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
-        windowItem.submenu = windowMenu
-        root.addItem(windowItem)
         NSApp.mainMenu = root
         NSApp.windowsMenu = windowMenu
+    }
+
+    private func command(_ title: String, _ action: Selector, in menu: NSMenu, key: String = "",
+                         modifiers: NSEvent.ModifierFlags = [.command]) {
+        let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+        item.target = self
+        item.keyEquivalentModifierMask = modifiers
+    }
+
+    public func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        let library = NSApp.keyWindow?.identifier?.rawValue == "clippy.library"
+        let canExport = library && model.canBrowseSessions && !model.exportSelection.isEmpty
+        switch menuItem.action {
+        case #selector(checkForUpdatesAction): return model.softwareUpdates.canCheck && model.canRelaunchForUpdate
+        case #selector(startRecordingAction):
+            return model.canToggleRecording && !model.recordingState.isRecording
+        case #selector(pauseResumeAction):
+            menuItem.title = model.recordingState == .paused ? "Resume Recording" : "Pause Recording"
+            return model.canToggleRecording && model.recordingState.isRecording
+        case #selector(finishAction): return model.canFinishRecording
+        case #selector(importAction): return model.canBrowseSessions
+        case #selector(exportSeparateAction), #selector(exportCombinedAction), #selector(copyRawAction), #selector(copyMarkdownAction):
+            return canExport
+        case #selector(exportAudioAction): return canExport && model.selectionMayHaveAudio
+        case #selector(compressAudioAction): return library && model.canCompressSelectedAudio
+        case #selector(revealTranscriptAction): return canExport && model.librarySelection.count <= 1 && model.activeSession?.outputFolderPath != nil
+        case #selector(openNotesAction): return library && model.librarySelection.count <= 1 && model.selectedSessionHasNotes
+        case #selector(regenerateNotesAction):
+            return canExport && model.librarySelection.count <= 1 && model.activeSession?.status == "completed"
+        case #selector(toggleSidebarAction):
+            menuItem.title = model.librarySidebarVisible ? "Hide Library Sidebar" : "Show Library Sidebar"
+            return library
+        default: return true
+        }
+    }
+
+    @objc private func startRecordingAction() { model.startRecording(); showRecordingControls() }
+    @objc private func pauseResumeAction() { if model.recordingState.isRecording { model.toggleRecording() } }
+    @objc private func exportSeparateAction() { model.chooseExport(.separateMarkdown) }
+    @objc private func exportCombinedAction() { model.chooseExport(.combinedMarkdown) }
+    @objc private func exportAudioAction() { model.chooseExport(.audio) }
+    @objc private func copyRawAction() { model.copySelectedTranscripts(format: .rawText) }
+    @objc private func copyMarkdownAction() { model.copySelectedTranscripts(format: .markdown) }
+    @objc private func compressAudioAction() { model.confirmAudioCompression() }
+    @objc private func revealTranscriptAction() { model.revealCompletedSession() }
+    @objc private func openNotesAction() { model.openNotes() }
+    @objc private func regenerateNotesAction() { model.regenerateNotes() }
+    @objc private func toggleSidebarAction() { model.librarySidebarVisible.toggle() }
+    @objc private func findAction() {
+        showLibrary()
+        model.librarySidebarVisible = true
+        DispatchQueue.main.async { self.model.libraryFindRequest &+= 1 }
     }
 
     private func add(_ title: String, action: Selector, to menu: NSMenu, key: String = "", enabled: Bool = true) {
@@ -270,11 +367,12 @@ public final class AppWindowController: NSObject, NSWindowDelegate {
     @objc private func finishAction() { model.finishRecording() }
     @objc private func quitAction() { NSApp.terminate(nil) }
     @objc private func aboutAction() { Self.showAboutPanel() }
+    @objc private func checkForUpdatesAction() { model.softwareUpdates.check() }
 
     public static func showAboutPanel() {
         var options: [NSApplication.AboutPanelOptionKey: Any] = [
             .applicationName: AppConstants.applicationName,
-            .applicationVersion: "\(AppConstants.releaseLabel) (build \(AppConstants.buildNumber))"
+            .applicationVersion: AppConstants.displayVersion
         ]
         if let repositoryURL = AppConstants.repositoryURL {
             let credits = NSMutableAttributedString(string: repositoryURL.absoluteString)

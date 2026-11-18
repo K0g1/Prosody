@@ -12,6 +12,7 @@ struct TranscriptNativeTableView: NSViewRepresentable {
     let followedRowID: UUID?
     let followDirective: TranscriptFollowDirective?
     let isScrubbing: () -> Bool
+    var reduceMotion = false
     let palette: ThemePalette
     let rename: (String, String) -> Void
     let seek: (TimeInterval) -> Void
@@ -68,6 +69,7 @@ struct TranscriptNativeTableView: NSViewRepresentable {
             followedRowID: followedRowID,
             followDirective: followDirective,
             isScrubbing: isScrubbing,
+            reduceMotion: reduceMotion,
             palette: palette,
             rename: rename,
             seek: seek,
@@ -84,6 +86,7 @@ struct TranscriptNativeTableView: NSViewRepresentable {
             followedRowID: followedRowID,
             followDirective: followDirective,
             isScrubbing: isScrubbing,
+            reduceMotion: reduceMotion,
             palette: palette,
             rename: rename,
             seek: seek,
@@ -118,12 +121,12 @@ struct TranscriptNativeTableView: NSViewRepresentable {
         private var onUserInteraction: () -> Void
         private weak var scrollView: TranscriptTableScrollView?
         private weak var tableView: TranscriptTableView?
-        private var pendingDirective: TranscriptFollowDirective?
         private var lastDirectiveRequestID: Int?
         private var isScrubbingProvider: () -> Bool
         private var scrubbing = false
         private var followTask: Task<Void, Never>?
-        private var observersInstalled = false
+        private var widthUpdateTask: Task<Void, Never>?
+        private var reduceMotion = false
 
         init(
             rename: @escaping (String, String) -> Void,
@@ -144,7 +147,9 @@ struct TranscriptNativeTableView: NSViewRepresentable {
             scrollView.onUserInteraction = { [weak self] in self?.userDidInteract() }
             tableView.onUserInteraction = { [weak self] in self?.userDidInteract() }
             tableView.onWidthChange = { [weak self] width in self?.widthDidChange(width) }
-            installObservers()
+            NotificationCenter.default.addObserver(self,
+                selector: #selector(scrollViewWillLiveScroll(_:)),
+                name: NSScrollView.willStartLiveScrollNotification, object: scrollView)
         }
 
         func update(
@@ -154,6 +159,7 @@ struct TranscriptNativeTableView: NSViewRepresentable {
             followedRowID: UUID?,
             followDirective: TranscriptFollowDirective?,
             isScrubbing: @escaping () -> Bool,
+            reduceMotion: Bool,
             palette: ThemePalette,
             rename: @escaping (String, String) -> Void,
             seek: @escaping (TimeInterval) -> Void,
@@ -169,7 +175,7 @@ struct TranscriptNativeTableView: NSViewRepresentable {
             let previousFollowedRowID = self.followedRowID
             let followedChanged = previousFollowedRowID != followedRowID
             let scrubbingNow = self.isScrubbingProvider()
-            let scrubbingEnded = scrubbing && !scrubbingNow
+            self.reduceMotion = reduceMotion
 
             self.canSeekAudio = canSeekAudio
             self.palette = palette
@@ -185,28 +191,24 @@ struct TranscriptNativeTableView: NSViewRepresentable {
                 updateFollowedCells(from: previousFollowedRowID, to: followedRowID)
             }
 
-            if let followDirective,
-               followDirective.requestID != lastDirectiveRequestID {
+            if let followDirective, followDirective.requestID != lastDirectiveRequestID {
                 lastDirectiveRequestID = followDirective.requestID
-                pendingDirective = followDirective
-                scheduleFollowIfNeeded()
+                cancelFollowTask()
+                // Finish covering the row reload and layout pass before
+                // measuring the row's new height.
+                followTask = Task { @MainActor [weak self] in
+                    self?.centerRow(followDirective)
+                }
             } else if followDirective == nil {
-                pendingDirective = nil
                 cancelFollowTask()
-            }
-
-            if scrubbingEnded, pendingDirective != nil {
-                cancelFollowTask()
-                flushFollow()
             }
         }
 
         func dismantle() {
             cancelFollowTask()
-            if observersInstalled {
-                NotificationCenter.default.removeObserver(self)
-                observersInstalled = false
-            }
+            widthUpdateTask?.cancel()
+            widthUpdateTask = nil
+            NotificationCenter.default.removeObserver(self)
             scrollView?.onUserInteraction = nil
             tableView?.onUserInteraction = nil
             tableView?.onWidthChange = nil
@@ -220,8 +222,9 @@ struct TranscriptNativeTableView: NSViewRepresentable {
 
         func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
             guard rows.indices.contains(row) else { return 60 }
-            let actualWidth = max(tableView.tableColumns.first?.width ?? 0, tableView.bounds.width)
-            let width = actualWidth > 0 ? actualWidth : (measuredWidth > 0 ? measuredWidth : 320)
+            // Reading NSTableView.bounds can synchronously invoke tile()
+            // from inside AppKit's row-height callback.
+            let width = max(1, measuredWidth > 0 ? measuredWidth : tableView.frame.width)
             let key = RowHeightKey(
                 rowID: rows[row].id,
                 width: width,
@@ -282,7 +285,7 @@ struct TranscriptNativeTableView: NSViewRepresentable {
                 uniquingKeysWith: { first, _ in first }
             )
             rowHeights.removeAll(keepingCapacity: true)
-            measuredWidth = tableView.bounds.width
+            measuredWidth = tableView.frame.width
             tableView.reloadData()
             if let anchorID, let index = rowIndexByID[anchorID] {
                 scrollRowToVisible(index)
@@ -366,49 +369,68 @@ struct TranscriptNativeTableView: NSViewRepresentable {
         }
 
         private func widthDidChange(_ width: CGFloat) {
-            guard abs(width - measuredWidth) > 0.5 else { return }
-            measuredWidth = width
-            rowHeights.removeAll(keepingCapacity: true)
-            guard let tableView, !rows.isEmpty else { return }
-            tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<rows.count))
+            guard width > 0, abs(width - measuredWidth) > 0.5 else { return }
+            widthUpdateTask?.cancel()
+            // AppKit calls setFrameSize from tile() and during live resizing.
+            // Invalidate after the final width settles, outside that layout.
+            widthUpdateTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(60))
+                guard let self, !Task.isCancelled, let tableView = self.tableView,
+                      !self.rows.isEmpty else { return }
+                let width = tableView.frame.width
+                guard abs(width - self.measuredWidth) > 0.5 else { return }
+                self.measuredWidth = width
+                self.rowHeights.removeAll(keepingCapacity: true)
+                tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<self.rows.count))
+            }
         }
 
-        private func scheduleFollowIfNeeded() {
-            guard followTask == nil, let directive = pendingDirective else { return }
-            guard let index = rowIndexByID[directive.rowID], !isRowVisible(index) else {
-                pendingDirective = nil
+        private func centerRow(_ directive: TranscriptFollowDirective) {
+            guard !Task.isCancelled, let scrollView, let tableView,
+                  let index = rowIndexByID[directive.rowID], rows.indices.contains(index) else { return }
+            let clip = scrollView.contentView
+            let start = clip.bounds.origin
+            let row = tableView.convert(tableView.rect(ofRow: index), to: clip)
+            var goal = clip.bounds
+            goal.origin.y = row.midY - goal.height / 2
+            goal = clip.constrainBoundsRect(goal)
+            let distance = goal.minY - start.y
+            guard abs(distance) > 0.75 else { return }
+            let animate = directive.shouldAnimate && !reduceMotion && !scrubbing
+                && abs(distance) < clip.bounds.height * 4
+            if !animate {
+                setScrollOrigin(goal.origin, in: scrollView)
                 return
             }
-            let delay: Duration = scrubbing ? .milliseconds(40) : .milliseconds(250)
-            followTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: delay)
-                guard !Task.isCancelled else { return }
-                self?.flushFollow()
+
+            followTask = Task { @MainActor [weak self, weak scrollView] in
+                let clock = ContinuousClock()
+                let began = clock.now
+                let duration = 0.20
+                while let self, let scrollView, !Task.isCancelled {
+                    let d = began.duration(to: clock.now).components
+                    let seconds = Double(d.seconds) + Double(d.attoseconds) / 1e18
+                    let fraction = min(seconds / duration, 1)
+                    let remaining = 1 - fraction
+                    let eased = 1 - remaining * remaining * remaining
+                    self.setScrollOrigin(NSPoint(x: start.x, y: start.y + distance * eased), in: scrollView)
+                    if fraction == 1 { break }
+                    try? await Task.sleep(for: .milliseconds(16))
+                }
             }
         }
 
-        private func flushFollow() {
-            followTask = nil
-            guard let directive = pendingDirective else { return }
-            pendingDirective = nil
-            guard let index = rowIndexByID[directive.rowID],
-                  !isRowVisible(index)
-            else { return }
-            scrollRowToVisible(index)
+        private func setScrollOrigin(_ point: NSPoint, in scrollView: TranscriptTableScrollView) {
+            scrollView.isProgrammaticScroll = true
+            scrollView.contentView.scroll(to: point)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            scrollView.isProgrammaticScroll = false
         }
 
         private func scrollRowToVisible(_ index: Int) {
-            guard let tableView else { return }
             scrollView?.isProgrammaticScroll = true
-            tableView.scrollRowToVisible(index)
-            Task { @MainActor [weak self] in
-                self?.scrollView?.isProgrammaticScroll = false
-            }
-        }
-
-        private func isRowVisible(_ index: Int) -> Bool {
-            guard let tableView, rows.indices.contains(index) else { return false }
-            return tableView.visibleRect.intersects(tableView.rect(ofRow: index))
+            tableView?.scrollRowToVisible(index)
+            scrollView?.isProgrammaticScroll = false
         }
 
         private func cancelFollowTask() {
@@ -417,45 +439,8 @@ struct TranscriptNativeTableView: NSViewRepresentable {
         }
 
         private func userDidInteract() {
-            pendingDirective = nil
             cancelFollowTask()
             onUserInteraction()
-        }
-
-        private func installObservers() {
-            guard !observersInstalled else { return }
-            observersInstalled = true
-            let center = NotificationCenter.default
-            center.addObserver(
-                self,
-                selector: #selector(applicationDidResignActive(_:)),
-                name: NSApplication.didResignActiveNotification,
-                object: nil
-            )
-            center.addObserver(
-                self,
-                selector: #selector(windowDidResignKey(_:)),
-                name: NSWindow.didResignKeyNotification,
-                object: nil
-            )
-            center.addObserver(
-                self,
-                selector: #selector(scrollViewWillLiveScroll(_:)),
-                name: NSScrollView.willStartLiveScrollNotification,
-                object: scrollView
-            )
-        }
-
-        @objc private func applicationDidResignActive(_ notification: Notification) {
-            suspendForBackground()
-        }
-
-        @objc private func windowDidResignKey(_ notification: Notification) {
-            guard let resigningWindow = notification.object as? NSWindow,
-                  let window = tableView?.window,
-                  resigningWindow === window
-            else { return }
-            suspendForBackground()
         }
 
         @objc private func scrollViewWillLiveScroll(_ notification: Notification) {
@@ -463,11 +448,6 @@ struct TranscriptNativeTableView: NSViewRepresentable {
             userDidInteract()
         }
 
-        private func suspendForBackground() {
-            pendingDirective = nil
-            cancelFollowTask()
-            onUserInteraction()
-        }
     }
 }
 
@@ -492,12 +472,21 @@ final class TranscriptTableView: NSTableView {
     var onUserInteraction: (() -> Void)?
     var onWidthChange: ((CGFloat) -> Void)?
 
+    override func accessibilityChildren() -> [Any]? {
+        guard let children = super.accessibilityChildren() else { return nil }
+        // Recycled AppKit row views can appear in subview order. Keep the
+        // accessibility hierarchy in transcript order without creating rows.
+        let rows = children.compactMap { $0 as? NSTableRowView }
+        var sortedRows = rows.sorted { row(for: $0) < row(for: $1) }.makeIterator()
+        return children.map { item in
+            guard item is NSTableRowView, let row = sortedRows.next() else { return item }
+            return row
+        }
+    }
+
     override func setFrameSize(_ newSize: NSSize) {
         let oldWidth = frame.width
         super.setFrameSize(newSize)
-        if let column = tableColumns.first, abs(column.width - newSize.width) > 0.5 {
-            column.width = newSize.width
-        }
         if abs(newSize.width - oldWidth) > 0.5 {
             onWidthChange?(newSize.width)
         }
@@ -559,7 +548,7 @@ final class TranscriptTableCell: NSTableCellView {
     }
 
     required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+        return nil
     }
 
     func configure(

@@ -1,9 +1,7 @@
 @preconcurrency import AVFoundation
 import Foundation
 
-#if canImport(FluidAudio)
 import FluidAudio
-#endif
 
 public enum ParakeetEngineError: Error, LocalizedError, Equatable, Sendable {
     case unsupportedModel(String)
@@ -12,7 +10,7 @@ public enum ParakeetEngineError: Error, LocalizedError, Equatable, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .unsupportedModel(let id): return "Parakeet model \(id) is not available for live transcription."
+        case .unsupportedModel(let id): return "Parakeet model \(id) is unsupported."
         case .modelNotPrepared: return "Parakeet is not prepared."
         case .modelUnavailable(let message): return message
         }
@@ -26,173 +24,97 @@ public actor ParakeetEngine: STTEngine {
     public nonisolated let descriptor = STTEngineDescriptor(
         id: .parakeet,
         displayName: "Parakeet",
-        detail: "Parakeet Unified local streaming transcription"
+        detail: "On-device speech recognition"
     )
 
     private let segmentationConfiguration: TranscriptSegmentationConfiguration
-    private var modelID: String?
+    private let inventory: STTModelManager
     private var modelDirectory: URL?
-
-#if canImport(FluidAudio)
     private var managers: [AudioSource: StreamingUnifiedAsrManager] = [:]
     private var preparedManager: StreamingUnifiedAsrManager?
-#endif
+    private var batchModel: BatchParakeetModel?
 
     public init(
-        segmentationConfiguration: TranscriptSegmentationConfiguration = .persisted()
+        segmentationConfiguration: TranscriptSegmentationConfiguration = .persisted(),
+        inventory: STTModelManager = STTModelManager()
     ) {
         self.segmentationConfiguration = segmentationConfiguration
+        self.inventory = inventory
     }
 
     public func prepare(
         model: STTModelDescriptor,
         progress: @Sendable @escaping (Double) -> Void
     ) async throws {
-        guard model.engineID == .parakeet, model.id == "parakeet-unified" else {
+        guard let speechModel = SpeechModel(descriptor: model) else {
             throw ParakeetEngineError.unsupportedModel(model.id)
         }
-
-#if canImport(FluidAudio)
-        let baseDirectory = ProsodyStorage.applicationSupportDirectory
-            .appendingPathComponent("Models", isDirectory: true)
-        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
-
-        let manager = StreamingUnifiedAsrManager()
-        do {
-            try await manager.loadModels(
-                to: baseDirectory,
-                configuration: nil,
-                progressHandler: { snapshot in
-                    progress(min(max(snapshot.fractionCompleted, 0), 1))
-                }
-            )
-        } catch {
-            throw ParakeetEngineError.modelUnavailable(error.localizedDescription)
+        await unload()
+        let directory = try await inventory.installedURL(for: speechModel)
+        if speechModel == .unified {
+            preparedManager = try await ParakeetDictationModel.loadManager(from: directory)
+            modelDirectory = directory
+        } else {
+            batchModel = try await BatchParakeetModel.load(speechModel, from: directory)
         }
-        managers.removeAll()
-        preparedManager = manager
-        modelDirectory = baseDirectory
-#else
-        throw ParakeetEngineError.modelUnavailable("FluidAudio is unavailable on this platform.")
-#endif
-        modelID = model.id
-        progress(1)
-    }
-
-    /// Downloads the active Parakeet Unified CoreML assets into Prosody's
-    /// application-support cache without constructing CoreML models. The
-    /// Models settings screen uses this path so a user can provision the
-    /// model before their first recording and observe byte-level progress.
-    public func download(
-        model: STTModelDescriptor,
-        progress: @Sendable @escaping (Double) -> Void
-    ) async throws {
-        guard model.engineID == .parakeet, model.id == "parakeet-unified" else {
-            throw ParakeetEngineError.unsupportedModel(model.id)
-        }
-
-#if canImport(FluidAudio)
-        let baseDirectory = ProsodyStorage.applicationSupportDirectory
-            .appendingPathComponent("Models", isDirectory: true)
-        try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
-
-        let encoderFile = ModelNames.ParakeetUnified.streamingEncoderFile(
-            precision: .int8,
-            contextSuffix: UnifiedConfig().contextSuffix
-        )
-        do {
-            try await ModelHub.download(
-                Repo.parakeetUnified,
-                to: baseDirectory,
-                additionalModelNames: [encoderFile],
-                progressHandler: { snapshot in
-                    progress(min(max(snapshot.fractionCompleted, 0), 1))
-                }
-            )
-        } catch {
-            throw ParakeetEngineError.modelUnavailable(error.localizedDescription)
-        }
-#else
-        throw ParakeetEngineError.modelUnavailable("FluidAudio is unavailable on this platform.")
-#endif
         progress(1)
     }
 
     public func makeSession(source: AudioSource) async throws -> any STTSession {
-        guard modelID == "parakeet-unified" else { throw ParakeetEngineError.modelNotPrepared }
-
-#if canImport(FluidAudio)
-        return ParakeetStreamingSession(source: source, manager: try await manager(for: source),
+        if let batchModel {
+            return batchModel.makeSession(source: source, configuration: segmentationConfiguration)
+        }
+        return ParakeetStreamingSession(source: source, manager: try await unifiedManager(for: source),
                                        segmentationConfiguration: segmentationConfiguration)
-#else
-        throw ParakeetEngineError.modelUnavailable("FluidAudio is unavailable on this platform.")
-#endif
     }
 
-#if canImport(FluidAudio)
-    private func manager(for source: AudioSource) async throws -> StreamingUnifiedAsrManager {
-        if let manager = managers[source] { return manager }
-
-        if let preparedManager {
-            self.preparedManager = nil
-            managers[source] = preparedManager
-            return preparedManager
+    private func unifiedManager(for source: AudioSource) async throws -> StreamingUnifiedAsrManager {
+        if let manager = managers[source] {
+            try await manager.reset()
+            return manager
         }
         guard let modelDirectory else { throw ParakeetEngineError.modelNotPrepared }
-        let manager = StreamingUnifiedAsrManager()
-        do {
-            try await manager.loadModels(to: modelDirectory)
-        } catch {
-            throw ParakeetEngineError.modelUnavailable(error.localizedDescription)
+        let manager: StreamingUnifiedAsrManager
+        if let preparedManager {
+            self.preparedManager = nil
+            manager = preparedManager
+        } else {
+            manager = try await ParakeetDictationModel.loadManager(from: modelDirectory)
         }
         managers[source] = manager
         return manager
     }
-#endif
 
     public func unload() async {
-#if canImport(FluidAudio)
-        for manager in managers.values {
-            await manager.cleanup()
-        }
+        for manager in managers.values { await manager.cleanup() }
         managers.removeAll()
         await preparedManager?.cleanup()
         preparedManager = nil
-#endif
-        modelID = nil
+        await batchModel?.unload()
+        batchModel = nil
         modelDirectory = nil
     }
 }
 
-#if canImport(FluidAudio)
-/// The dictation recognizer has exclusive use of this manager until its
-/// worker finishes and resets it. Only archive replay can provision a model.
+/// The recognizer leases a local model across live input and archive replay.
 struct ParakeetDictationModel: DictationRecognitionModel {
     private let manager: StreamingUnifiedAsrManager
 
-    static let missingModelMessage =
-        "Install Parakeet Unified in Settings → Models before using dictation."
+    static let missingModelMessage = "Install Parakeet Unified in Settings → Models before using dictation."
 
-    static func loadInstalled() async throws -> Self {
-        let registry = STTRegistry()
-        let inventory = STTModelManager()
-        guard let model = await registry.model(id: "parakeet-unified", for: .parakeet),
-              await inventory.isInstalled(model) else {
-            throw ParakeetEngineError.modelUnavailable(missingModelMessage)
-        }
-        let directory = await inventory.modelURL(for: model)
+    static func loadInstalled(
+        _ model: SpeechModel = .unified, inventory: STTModelManager = STTModelManager()
+    ) async throws -> any DictationRecognitionModel {
+        let directory = try await inventory.installedURL(for: model)
+        if model != .unified { return try await BatchParakeetModel.load(model, from: directory) }
+        return try await Self(manager: loadManager(from: directory))
+    }
+
+    static func loadManager(from directory: URL) async throws -> StreamingUnifiedAsrManager {
         try Task.checkCancellation()
         let manager = StreamingUnifiedAsrManager()
-        // Never enter a downloader while capture is feeding the live queue,
-        // even if the cache was deleted after the inventory check.
-        do {
-            try await manager.loadModels(from: directory)
-        } catch {
-            throw ParakeetEngineError.modelUnavailable(
-                "\(missingModelMessage) The installed files could not be loaded: \(error.localizedDescription)"
-            )
-        }
-        return Self(manager: manager)
+        try await manager.loadModels(from: directory)
+        return manager
     }
 
     func makeDictationSession(configuration: TranscriptSegmentationConfiguration) -> any DictationRecognitionSession {
@@ -201,7 +123,6 @@ struct ParakeetDictationModel: DictationRecognitionModel {
     }
 
     func reset() async throws { try await manager.reset() }
-
     func unload() async { await manager.cleanup() }
 }
 
@@ -369,4 +290,3 @@ public actor ParakeetStreamingSession: STTSession {
 
 @_spi(Validation)
 extension ParakeetStreamingSession: DictationRecognitionSession {}
-#endif

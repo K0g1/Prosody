@@ -9,13 +9,27 @@ struct TranscriptionSettingsView: GroupedSettingsSearchPage {
         .init("clippy.settings.transcription.live", "Live transcription",
               help: "Turn off to transcribe after recording and reduce CPU/GPU use during capture. Applies to the next recording.",
               keywords: ["streaming", "real time", "CPU GPU"]) { pane, entry in
-            Toggle(entry.title, isOn: pane.$preferences.liveTranscription)
-                .labelsHidden().toggleStyle(.switch)
+            Toggle(entry.title, isOn: Binding(
+                get: { pane.model.selectedSpeechModel.descriptor.supportsStreaming && pane.preferences.liveTranscription },
+                set: { pane.preferences.liveTranscription = $0 }
+            ))
+            .labelsHidden().toggleStyle(.prosodySwitch)
+            .disabled(!pane.model.selectedSpeechModel.descriptor.supportsStreaming)
         },
         .init("clippy.settings.transcription.model", "Speech model",
               help: "Recordings, imports, and dictation share this local model.",
               keywords: ["Parakeet Unified", "English", "language", "engine", "streaming model"]) { pane, _ in
-            Text("Parakeet Unified · English").foregroundStyle(pane.palette.secondary)
+            let descriptor = pane.model.selectedSpeechModel.descriptor
+            Text(descriptor.displayName).foregroundStyle(pane.palette.secondary)
+        }
+    ])
+
+    private static let cleanup = SettingsControlGroup<Self>("Text cleanup", controls: [
+        .init("clippy.settings.transcription.filler-words", "Omit filler words",
+              help: "Remove written hesitations such as um, uh, and hmm from new transcripts and dictation.",
+              keywords: ["hesitation", "remove ums", "clean speech", "dictation", "capitalization"]) { pane, entry in
+            Toggle(entry.title, isOn: pane.$preferences.omitFillerWords)
+                .labelsHidden().toggleStyle(.prosodySwitch)
         }
     ])
 
@@ -42,7 +56,7 @@ struct TranscriptionSettingsView: GroupedSettingsSearchPage {
         }
     ])
 
-    static let groups = [streaming, layout]
+    static let groups = [streaming, cleanup, layout]
 
     init(model: AppModel) {
         self.model = model
@@ -52,8 +66,9 @@ struct TranscriptionSettingsView: GroupedSettingsSearchPage {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             SettingsPageHeader(title: "Transcription")
-            Self.streaming.render(in: self, context: model.canBrowseSessions ? nil : "Live transcription settings are locked while \(AppConstants.applicationName) is recording or processing audio.")
+            Self.streaming.render(in: self, context: model.selectedSpeechModel.descriptor.supportsStreaming ? nil : "The selected model transcribes recordings after you finish.")
                 .disabled(!model.canBrowseSessions)
+            Self.cleanup.render(in: self)
             Self.layout.render(in: self, context: "Layout changes apply to the next transcription.")
         }
     }

@@ -29,6 +29,11 @@ public final class SessionAudioPlayer: NSObject, ObservableObject, AVAudioPlayer
     @Published public private(set) var requestedAudioCount = 0
     @Published public private(set) var isScrubbing = false
     @Published private(set) var scrubEndRequest = 0
+    private let playbackTicks = PassthroughSubject<TimeInterval, Never>()
+
+    /// Row following uses the measured audio position at a finer cadence than
+    /// the transport. Only a row transition invalidates the transcript view.
+    var playbackTickPublisher: AnyPublisher<TimeInterval, Never> { playbackTicks.eraseToAnyPublisher() }
 
     /// Emits only after inspection has settled for a nonempty request. The
     /// transcript root consumes this instead of observing every clock tick.
@@ -347,20 +352,30 @@ public final class SessionAudioPlayer: NSObject, ObservableObject, AVAudioPlayer
     }
 
     private func refreshClockFromPlayer(minimumTime: TimeInterval? = nil) {
-        guard let player, let index = loadedChunkIndex else { return }
-        let measured = audioTimeline.globalTime(chunkIndex: index, localTime: player.currentTime)
+        guard let measured = measuredPlaybackTime else { return }
         currentTime = max(minimumTime ?? measured, measured)
+    }
+
+    var measuredPlaybackTime: TimeInterval? {
+        guard let player, let index = loadedChunkIndex else { return nil }
+        return audioTimeline.globalTime(chunkIndex: index, localTime: player.currentTime)
     }
 
     private func startTimer() {
         cancelTimer()
         tickTask = Task { @MainActor [weak self] in
+            let clock = ContinuousClock()
+            var nextTransportUpdate = clock.now.advanced(by: .milliseconds(200))
             while !Task.isCancelled {
-                // Audio runs independently. A five-Hz progress refresh is
-                // sufficient for the transport and row-follow leaves.
-                try? await Task.sleep(for: .milliseconds(200))
+                try? await Task.sleep(for: .milliseconds(50))
                 guard let self, !Task.isCancelled, self.isPlaying else { return }
-                self.refreshClockFromPlayer()
+                guard let measured = self.measuredPlaybackTime else { continue }
+                self.playbackTicks.send(measured)
+                let now = clock.now
+                if now >= nextTransportUpdate {
+                    self.currentTime = measured
+                    nextTransportUpdate = now.advanced(by: .milliseconds(200))
+                }
             }
         }
     }

@@ -60,8 +60,7 @@ build_app_bundle() {
     "$ROOT_DIR/script/build_icon.sh"
   fi
 
-  # Keep SwiftPM as the canonical build system. This works with Command Line
-  # Tools alone and does not require an Xcode project or workspace.
+  # SwiftPM builds both products. The bundle stage also uses Xcode’s App Intents extractor.
   local build_args=(--force-resolved-versions --configuration "$CONFIGURATION")
   if [[ "$CONFIGURATION" == "release" ]]; then
     build_args+=(
@@ -79,15 +78,26 @@ build_app_bundle() {
     )
   fi
   swift build "${build_args[@]}" --product "$APP_NAME"
+  swift build "${build_args[@]}" --product ProsodyCLI
   local build_bin_path
   build_bin_path="$(swift build "${build_args[@]}" --show-bin-path)"
   local build_binary="$build_bin_path/$APP_NAME"
   [[ -x "$build_binary" ]] || die "SwiftPM did not produce $build_binary"
+  local sparkle_artifact="$build_bin_path/Sparkle.framework"
+  [[ -d "$sparkle_artifact" ]] || die "SwiftPM did not resolve Sparkle.framework"
 
   # This is a script-owned artifact, so it is safe to replace on each run.
   rm -rf "$APP_BUNDLE"
-  mkdir -p "$APP_MACOS" "$APP_RESOURCES"
+  mkdir -p "$APP_MACOS" "$APP_RESOURCES" "$APP_CONTENTS/Helpers" "$APP_CONTENTS/Frameworks"
   install -m 755 "$build_binary" "$APP_BINARY"
+  local sparkle="$APP_CONTENTS/Frameworks/Sparkle.framework"
+  /usr/bin/ditto "$sparkle_artifact" "$sparkle"
+  local bundle_rpath="@executable_path/../Frameworks"
+  if ! /usr/bin/otool -l "$APP_BINARY" | awk '/cmd LC_RPATH/{getline; getline; print $2}' | grep -Fxq "$bundle_rpath"; then
+    /usr/bin/install_name_tool -add_rpath "$bundle_rpath" "$APP_BINARY"
+  fi
+  install -m 755 "$build_bin_path/ProsodyCLI" "$APP_CONTENTS/Helpers/prosody"
+  install -m 644 "$ROOT_DIR/docs/skills/prosody-cli/SKILL.md" "$APP_RESOURCES/SKILL.md"
   install -m 644 "$INFO_PLIST" "$APP_CONTENTS/Info.plist"
   install -m 644 "$APP_ICON" "$APP_RESOURCES/Prosody.icns"
   install -m 644 "$ROOT_DIR/Sources/ProsodyCore/Resources/ProsodyMenuBar.svg" "$APP_RESOURCES/ProsodyMenuBar.svg"
@@ -110,13 +120,20 @@ build_app_bundle() {
   staged_identifier="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$APP_CONTENTS/Info.plist")"
   [[ "$staged_identifier" == "$BUNDLE_ID" ]] || die "Bundle identifier mismatch: expected $BUNDLE_ID, found $staged_identifier"
 
+  "$ROOT_DIR/script/extract_app_intents.sh" "$build_bin_path" "$APP_RESOURCES" "$APP_CONTENTS/Info.plist"
+  /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" "$APP_CONTENTS/Helpers/prosody"
+
   # A stable development identity keeps TCC grants valid across rebuilds. It
   # must be explicit: changing the signer of an existing sandbox installation
   # can trigger a separate macOS container-ownership approval.
   if [[ "$SIGNING_IDENTITY" == "-" ]]; then
     echo "Ad-hoc signing requested: macOS may require removing and re-adding Prosody in Screen & System Audio Recording after rebuilds." >&2
   else
-    echo "Signing with stable identity: $SIGNING_IDENTITY" >&2
+    echo "Signing with a stable identity" >&2
+    local sparkle_version="$sparkle/Versions/$(readlink "$sparkle/Versions/Current")"
+    for component in "$sparkle_version/XPCServices/"*.xpc "$sparkle_version/Autoupdate" "$sparkle_version/Updater.app" "$sparkle_version"; do
+      /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --preserve-metadata=identifier,entitlements,flags "$component"
+    done
   fi
   /usr/bin/codesign --force --sign "$SIGNING_IDENTITY" --entitlements "$ENTITLEMENTS" "$APP_BUNDLE"
   /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"

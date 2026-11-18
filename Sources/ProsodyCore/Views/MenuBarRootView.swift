@@ -8,6 +8,7 @@ public struct MenuBarRootView: View {
     private let expands: Bool
     @State private var recoveryToDelete: UUID?
     @State private var sessionToDelete: UUID?
+    @State private var shortcutReady = true
 
     public init(model: AppModel, expands: Bool = false) {
         self.model = model
@@ -16,6 +17,7 @@ public struct MenuBarRootView: View {
     }
 
     private var state: RecordingState { model.recordingState }
+    private var needsDictationSetup: Bool { !model.demoMode && !shortcutReady }
 
     private var showsNextRecording: Bool {
         switch state {
@@ -69,7 +71,7 @@ public struct MenuBarRootView: View {
                 .layoutPriority(1)
 
             if !optionalSections.isEmpty || state.isRecording || recordingFailure != nil || otherError != nil
-                || notice != nil || recovery != nil {
+                || notice != nil || recovery != nil || needsDictationSetup {
                 if expands {
                     details(sections: optionalSections)
                 } else {
@@ -103,6 +105,7 @@ public struct MenuBarRootView: View {
         .frame(maxWidth: expands ? .infinity : nil, alignment: .leading)
         .tint(palette.accent)
         .accessibilityIdentifier("clippy.menu-popover")
+        .onReceive(model.dictation.$shortcutReady.removeDuplicates()) { shortcutReady = $0 }
     }
 
     @ViewBuilder
@@ -115,6 +118,13 @@ public struct MenuBarRootView: View {
             if let otherError {
                 MenuBarErrorNotice(error: otherError)
                     .accessibilityIdentifier("clippy.error")
+            }
+            if needsDictationSetup {
+                Button("Set Up Dictation…", systemImage: "keyboard.badge.exclamationmark") {
+                    AppWindowController.shared.showDictationSettings()
+                }
+                .buttonStyle(.link)
+                .help("Check the permissions required for the global dictation shortcut.")
             }
             if let notice {
                 Label(notice, systemImage: "info.circle")
@@ -238,7 +248,10 @@ private struct MenuBarErrorNotice: View {
             Text(error.message)
                 .font(.system(size: 12))
                 .foregroundStyle(palette.secondary)
-            if let recoveryAction = error.recoveryAction {
+            if let recoveryAction = error.recoveryAction, let recoveryURL = error.recoveryURL {
+                Link(recoveryAction, destination: recoveryURL)
+                    .font(.system(size: 12, weight: .medium))
+            } else if let recoveryAction = error.recoveryAction {
                 Text(recoveryAction)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(palette.secondary)

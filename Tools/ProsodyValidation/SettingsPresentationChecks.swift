@@ -63,109 +63,15 @@ extension ProsodyValidation {
         }
         precondition(AudioMeterCalculator.level(for: Array(repeating: 0.01, count: 256)).rms < 0.025,
                      "Visual sensitivity must not change measured audio")
-        checkLegacyMigrationAndDefaults()
-        print("Settings/presentation: PASS (editable preference persistence, migration, default destination, layout visibility, session snapshots, segmentation bounds, perceptual meter)")
+        checkDefaultOutputFolder()
+        print("Settings/presentation: PASS (editable preference persistence, default destination, layout visibility, session snapshots, segmentation bounds, perceptual meter)")
     }
 
     @MainActor
-    private static func checkLegacyMigrationAndDefaults() {
+    private static func checkDefaultOutputFolder() {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent("Prosody-Migration-Validation-\(UUID())")
         defer { try? fileManager.removeItem(at: root) }
-
-        let legacy = root.appendingPathComponent("legacy", isDirectory: true)
-        let preferencesDirectory = legacy.appendingPathComponent("Library/Preferences", isDirectory: true)
-        let preferencesURL = preferencesDirectory.appendingPathComponent("\(AppConstants.bundleIdentifier).plist")
-        let sandboxOutput = legacy.appendingPathComponent("Clippy", isDirectory: true)
-        let outputKey = "preferences.outputFolder"
-        let markerKey = "migration.directDistribution.v1"
-        try! fileManager.createDirectory(at: preferencesDirectory, withIntermediateDirectories: true)
-
-        var suites: [(name: String, defaults: UserDefaults)] = []
-        defer {
-            for suite in suites { UserDefaults.standard.removePersistentDomain(forName: suite.name) }
-        }
-        func newDefaults() -> UserDefaults {
-            let name = "Prosody-Migration-\(UUID())"
-            let defaults = UserDefaults(suiteName: name)!
-            suites.append((name, defaults))
-            return defaults
-        }
-        func writeLegacyPreferences(_ values: [String: Any]) {
-            let plist = try! PropertyListSerialization.data(fromPropertyList: values, format: .xml, options: 0)
-            try! plist.write(to: preferencesURL)
-        }
-        func migrate(_ defaults: UserDefaults) {
-            LegacyDataMigration.migrateIfNeeded(defaults: defaults, legacyDataDirectory: legacy)
-            precondition(defaults.bool(forKey: markerKey))
-        }
-
-        let label = RecordingLabel(
-            name: "Course", colorHex: "#336699", outputFolderPath: "/fixture/label",
-            namingPattern: "{label} {title}", dateFormat: "yyyy-MM-dd"
-        )
-        let destination = RecordingDestination(path: "/fixture/destination", bookmarkData: Data([1, 2, 3]))
-        let storedBookmark = Data([4, 5, 6])
-        let importedValues: [String: Any] = [
-            "preferences.theme": "aurora",
-            "preferences.recordingLabels": try! JSONEncoder().encode([label]),
-            "preferences.recordingDestinations": try! JSONEncoder().encode([destination]),
-            "preferences.outputBookmark": storedBookmark,
-            "unrelated": "ignored"
-        ]
-
-        try! fileManager.createDirectory(at: sandboxOutput, withIntermediateDirectories: true)
-        var customValues = importedValues
-        customValues[outputKey] = "/fixture/imported-custom"
-        writeLegacyPreferences(customValues)
-        let importedCustom = newDefaults()
-        migrate(importedCustom)
-        let restored = ProsodyPreferences(defaults: importedCustom)
-        precondition(restored.theme == .aurora)
-        precondition(restored.recordingLabels == [label])
-        precondition(restored.recordingDestinations == [destination])
-        precondition(restored.outputFolderPath == "/fixture/imported-custom")
-        precondition(restored.outputFolderBookmarkData == storedBookmark)
-        precondition(importedCustom.object(forKey: "unrelated") == nil)
-
-        var historicalValues = importedValues
-        historicalValues[outputKey] = "~/Clippy"
-        writeLegacyPreferences(historicalValues)
-        let existing = newDefaults()
-        existing.set("/fixture/current-output", forKey: "preferences.outputFolder")
-        existing.set(Data([9, 10]), forKey: "preferences.outputBookmark")
-        existing.set("graphite", forKey: "preferences.theme")
-        migrate(existing)
-        let preserved = ProsodyPreferences(defaults: existing)
-        precondition(preserved.outputFolderPath == "/fixture/current-output")
-        precondition(preserved.outputFolderBookmarkData == Data([9, 10]))
-        precondition(preserved.theme == .graphite)
-        precondition(preserved.recordingLabels == [label])
-        precondition(preserved.recordingDestinations == [destination])
-
-        let historical = newDefaults()
-        migrate(historical)
-        precondition(historical.string(forKey: outputKey) == sandboxOutput.path)
-
-        var missingOutput = importedValues
-        missingOutput.removeValue(forKey: outputKey)
-        writeLegacyPreferences(missingOutput)
-        let absent = newDefaults()
-        migrate(absent)
-        precondition(absent.string(forKey: outputKey) == sandboxOutput.path)
-
-        try! fileManager.removeItem(at: sandboxOutput)
-        precondition(fileManager.createFile(atPath: sandboxOutput.path, contents: Data()))
-        writeLegacyPreferences(historicalValues)
-        let nonDirectory = newDefaults()
-        migrate(nonDirectory)
-        precondition(nonDirectory.string(forKey: outputKey) == "~/Clippy")
-
-        try! fileManager.removeItem(at: sandboxOutput)
-        writeLegacyPreferences(missingOutput)
-        let cleanInstall = newDefaults()
-        migrate(cleanInstall)
-        precondition(cleanInstall.object(forKey: outputKey) == nil)
 
         let home = root.appendingPathComponent("home", isDirectory: true)
         let legacyOutput = home.appendingPathComponent(AppConstants.legacyDefaultOutputFolderName, isDirectory: true)

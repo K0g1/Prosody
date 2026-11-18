@@ -27,6 +27,18 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Load the signed feed from the latest published release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_tag="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" | jq -r '
+            flatten | map(select(.draft == false and any(.assets[]; .name == "appcast.xml" and .state == "uploaded")))
+            | max_by(.published_at) | .tag_name // empty
+          ')"
+          if [[ -n "$release_tag" ]]; then
+            gh release download "$release_tag" --repo "$GITHUB_REPOSITORY" --pattern appcast.xml --dir site
+          fi
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload static site

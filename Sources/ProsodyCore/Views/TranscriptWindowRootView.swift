@@ -4,6 +4,7 @@ import SwiftUI
 
 public struct TranscriptWindowRootView: View {
     @Environment(\.prosodyPalette) private var palette
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject public var model: AppModel
 
     @State private var searchText = ""
@@ -13,6 +14,7 @@ public struct TranscriptWindowRootView: View {
     @State private var followsAudioBeforeSearch = false
     @State private var player: SessionAudioPlayer
     @State private var playbackLoadTask: Task<Void, Never>?
+    @State private var retainedAudioBytes: Int64 = 0
     @State private var audioAvailability: Bool? = nil
     @StateObject private var readerCache: TranscriptReaderCache
     @StateObject private var followController = TranscriptFollowController()
@@ -20,6 +22,7 @@ public struct TranscriptWindowRootView: View {
     private struct PlaybackSource: Equatable {
         let sessionID: UUID?
         let audioURLs: [URL]
+        let assetRevision: Int
     }
 
     public init(model: AppModel) {
@@ -33,7 +36,7 @@ public struct TranscriptWindowRootView: View {
     private var hasSelectedSession: Bool { model.selectedSessionID != nil || model.activeSession != nil }
 
     private var playbackSource: PlaybackSource {
-        PlaybackSource(sessionID: model.selectedSessionID, audioURLs: model.selectedSessionAudioURLs)
+        PlaybackSource(sessionID: model.selectedSessionID, audioURLs: model.selectedSessionAudioURLs, assetRevision: model.audioAssetRevision)
     }
 
     public var body: some View {
@@ -72,6 +75,7 @@ public struct TranscriptWindowRootView: View {
                 followsAudio: $followsAudio,
                 isSearchActive: !searchText.isEmpty
             )
+            .disabled(model.isCompressingAudio)
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
 
@@ -132,6 +136,15 @@ public struct TranscriptWindowRootView: View {
         .onDisappear {
             playbackLoadTask?.cancel()
             playbackLoadTask = nil
+        }
+        .onChange(of: model.isCompressingAudio) { _, value in
+            if value { player.stop() }
+        }
+        .task(id: playbackSource) {
+            retainedAudioBytes = 0
+            guard let session = model.activeSession, session.id == model.selectedSessionID else { return }
+            let bytes = await model.retainedAudioBytes(for: session)
+            if !Task.isCancelled { retainedAudioBytes = bytes }
         }
         .task(id: copiedFormat) {
             guard !copiedFormat.isEmpty else { return }
@@ -212,6 +225,7 @@ public struct TranscriptWindowRootView: View {
             followedRowID: followController.directive?.rowID,
             followDirective: followController.directive,
             isScrubbing: { player.isScrubbing },
+            reduceMotion: reduceMotion,
             palette: palette,
             rename: model.renameSpeaker,
             seek: player.seek,
@@ -286,11 +300,16 @@ public struct TranscriptWindowRootView: View {
             Button { copyTranscript() } label: {
                 Label(copiedFormat == "markdown" ? "Copied" : "Copy Markdown", systemImage: copiedFormat == "markdown" ? "checkmark" : "doc.on.doc")
             }
-            .help("Copy the formatted transcript as Markdown")
+            .help("Copy Markdown using Settings → Transcript Export, including the selected metadata and speech details")
             .disabled(timeline.rows.isEmpty)
             .accessibilityIdentifier("clippy.transcript.copy")
 
             Spacer(minLength: 8)
+            if retainedAudioBytes > 0 {
+                Button("Compress Audio…", systemImage: "arrow.down.right.and.arrow.up.left") { model.confirmAudioCompression() }
+                    .help("Replace retained audio with a smaller AAC copy when possible")
+                    .disabled(!model.canCompressSelectedAudio)
+            }
             Menu {
                 Button("Rename Speakers", systemImage: "person.crop.circle.badge.pencil") { showingSpeakerEditor = true }
                     .disabled(!model.canBrowseSessions || timeline.rows.isEmpty)
@@ -339,7 +358,9 @@ public struct TranscriptWindowRootView: View {
         guard let date else { return "Choose a transcript to read" }
         let audioStatus: String
         if hasAudio {
-            audioStatus = "Audio available"
+            audioStatus = retainedAudioBytes > 0
+                ? "Audio \(ByteCountFormatter.string(fromByteCount: retainedAudioBytes, countStyle: .file))"
+                : "Audio available"
         } else if player.didFinishLoading && player.requestedAudioCount > 0 {
             audioStatus = "Audio unavailable"
         } else {
@@ -366,13 +387,15 @@ public struct TranscriptWindowRootView: View {
     }
 
     private func copyTranscript() {
-        let markdown = MarkdownRenderer.render(
-            model.transcript,
-            title: model.selectedSessionTitle,
-            date: sessionDate ?? .now,
-            duration: sessionDuration,
-            labels: model.selectedSessionLabels
-        )
+        let markdown: String
+        if let session = model.activeSession {
+            markdown = TranscriptExportFormatter.render(
+                SessionDocument(session: session, transcript: model.transcript), options: model.preferences.transcriptExport
+            )
+        } else {
+            markdown = MarkdownRenderer.render(model.transcript, title: model.selectedSessionTitle,
+                                                date: sessionDate ?? .now, duration: sessionDuration)
+        }
         copyText(markdown, format: "markdown")
     }
 
@@ -456,8 +479,9 @@ struct TranscriptRowView: View {
         }
         .padding(.vertical, 13)
         .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            isFollowed ? palette.accent.opacity(0.07) : Color.clear,
+            isFollowed ? palette.accent.opacity(0.15) : Color.clear,
             in: RoundedRectangle(cornerRadius: 8, style: .continuous)
         )
         .overlay(alignment: .leading) {

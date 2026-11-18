@@ -33,7 +33,7 @@ struct AudioSettingsView: GroupedSettingsSearchPage {
               help: "Keep the source audio for playback in Transcripts.",
               keywords: ["save recording", "retain audio"]) { pane, entry in
             Toggle(entry.title, isOn: pane.$preferences.keepAudio)
-                .labelsHidden().toggleStyle(.switch)
+                .labelsHidden().toggleStyle(.prosodySwitch)
         },
         .init("clippy.settings.audio.quality", "Recording quality",
               help: "Efficient uses less disk space; High preserves more detail.",

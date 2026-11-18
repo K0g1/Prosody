@@ -121,7 +121,10 @@ struct DictationTextDestination {
             await waitForGestureRelease()
             guard !Task.isCancelled else { return false }
         }
-        guard CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty else { return false }
+        guard CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty else {
+            logger.info("Insertion deferred: modifier keys are still held")
+            return false
+        }
         let originalSelection = selectedRange
         // Capitalization is delivery-only. The transcript and archive retain
         // the caller's original text.
@@ -151,7 +154,10 @@ struct DictationTextDestination {
               let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false),
               let commandUp = CGEvent(keyboardEventSource: source, virtualKey: 55, keyDown: false) else { return false }
-        guard applicationIsCurrent else { return false }
+        guard applicationIsCurrent else {
+            logger.info("Insertion deferred: the original app is no longer active")
+            return false
+        }
         let pasteboard = NSPasteboard.general
         let previous = keepOnClipboard ? nil : DictationClipboardSnapshot(pasteboard)
         // A clipboard owner may be slow to provide its data. Do the focus and
@@ -173,6 +179,7 @@ struct DictationTextDestination {
         guard pasteboard.setString(insertionText, forType: .string), pasteboard.changeCount == ourChange,
               applicationIsCurrent else {
             previous?.restore(ifUnchangedSince: ourChange)
+            logger.info("Insertion deferred: the clipboard or original app changed before paste")
             return false
         }
         down.flags = .maskCommand

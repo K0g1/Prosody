@@ -6,29 +6,14 @@ import SwiftUI
 public struct MenuBarIconView: View {
     // Reused by the in-app mark so every surface has the same cached artwork.
     static let artwork: NSImage = {
-        if let image = bundledArtwork(in: .main) {
+        if let url = ProsodyResources.url(named: "ProsodyMenuBar.svg"),
+           let image = NSImage(contentsOf: url) {
             return image
         }
-#if DEBUG
-        // Look beside the app resources or debug executable without invoking
-        // SwiftPM's generated accessor, which traps if the bundle is missing.
-        let directories = [Bundle.main.resourceURL, Bundle.main.bundleURL].compactMap { $0 }
-        for directory in directories {
-            let bundleURL = directory.appendingPathComponent("Prosody_ProsodyCore.bundle", isDirectory: true)
-            if let bundle = Bundle(url: bundleURL), let image = bundledArtwork(in: bundle) {
-                return image
-            }
-        }
-#endif
         AppLogger.app.warning("Missing or invalid bundled ProsodyMenuBar.svg; using a system icon.")
         return NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)
             ?? NSImage(size: NSSize(width: 18, height: 18))
     }()
-
-    private static func bundledArtwork(in bundle: Bundle) -> NSImage? {
-        guard let url = bundle.url(forResource: "ProsodyMenuBar", withExtension: "svg") else { return nil }
-        return NSImage(contentsOf: url)
-    }
 
     private static let idleImage = makeStatusImage(recording: false)
     private static let recordingImage = makeStatusImage(recording: true)

@@ -7,6 +7,7 @@ enum SettingsSection: String, CaseIterable, Hashable, Identifiable, Sendable {
     case mainScreen
     case audio
     case transcription
+    case transcriptExport
     case dictation
     case replacements
     case speakers
@@ -26,6 +27,7 @@ enum SettingsSection: String, CaseIterable, Hashable, Identifiable, Sendable {
         case .general: return "General"
         case .audio: return "Audio"
         case .transcription: return "Transcription"
+        case .transcriptExport: return "Transcript Export"
         case .speakers: return "Speakers"
         case .notes: return "Notes"
         case .models: return "Models"
@@ -43,6 +45,7 @@ enum SettingsSection: String, CaseIterable, Hashable, Identifiable, Sendable {
         case .general: return "gearshape"
         case .audio: return "speaker.wave.2"
         case .transcription: return "text.alignleft"
+        case .transcriptExport: return "square.and.arrow.up"
         case .speakers: return "person.2"
         case .notes: return "note.text"
         case .models: return "shippingbox"
@@ -58,6 +61,7 @@ enum SettingsSection: String, CaseIterable, Hashable, Identifiable, Sendable {
         case .mainScreen: MainScreenSettingsView.self
         case .audio: AudioSettingsView.self
         case .transcription: TranscriptionSettingsView.self
+        case .transcriptExport: TranscriptExportSettingsView.self
         case .dictation: DictationSettingsView.self
         case .replacements: WordReplacementsSettingsView.self
         case .speakers: SpeakerSettingsView.self
@@ -71,6 +75,7 @@ enum SettingsSection: String, CaseIterable, Hashable, Identifiable, Sendable {
 
 public struct SettingsRootView: View {
     @Environment(\.prosodyPalette) private var palette
+    @Environment(\.usesWindowMaterial) private var usesWindowMaterial
     @ObservedObject public var model: AppModel
     @State private var selection: SettingsSection = .general
     @State private var destination: SettingsSearchRequest?
@@ -90,11 +95,12 @@ public struct SettingsRootView: View {
                 detail
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(palette.surface.opacity(0.42))
+            .background(palette.surface.opacity(usesWindowMaterial ? 0.12 : 0.42))
         }
         .tint(palette.accent)
         .environment(labelDrafts)
         .accessibilityIdentifier("clippy.settings")
+        .onReceive(model.$requestedSettingsSection.compactMap { $0 }) { selectSection($0) }
     }
 
     private var editingSuspended: Bool {

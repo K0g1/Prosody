@@ -154,6 +154,17 @@ actor DictationModelCache<Model: Sendable> {
         }
     }
 
+    /// Used during model replacement, after the controller has drained every
+    /// dictation. Wait for a launch prewarm and its cleanup before deleting files.
+    func releaseAndWaitIfIdle() async {
+        releaseIfIdle()
+        if let flight {
+            let result = await flight.task.result
+            resolveFlight(id: flight.id, result: result)
+        }
+        await cleanupTask?.value
+    }
+
     /// Drops a model after its owner could not reset it. No other native work
     /// can be using this lease because the recognizer serializes recognition.
     func invalidate(_ leaseID: UUID) {

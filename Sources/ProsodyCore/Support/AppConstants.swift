@@ -18,7 +18,10 @@ public enum AppConstants {
     public static let releaseLabel: String =
         (Bundle.main.object(forInfoDictionaryKey: "ClippyReleaseLabel") as? String) ?? appVersion
     public static let buildNumber: String =
-        (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "13"
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? "15"
+    public static var displayVersion: String {
+        releaseLabel.replacingOccurrences(of: "-beta.", with: " Beta ")
+    }
     // FluidAudio's `Repo.parakeetUnified.folderName` is the cache directory
     // used by `StreamingUnifiedAsrManager.loadModels(to:)`.
     public static let modelCacheFolderName = "parakeet-unified-en-0.6b"

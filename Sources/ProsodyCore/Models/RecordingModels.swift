@@ -81,14 +81,16 @@ public struct UserFacingError: LocalizedError, Codable, Equatable, Sendable, Ide
     public let title: String
     public let message: String
     public let recoveryAction: String?
+    public let recoveryURL: URL?
 
     public var errorDescription: String? { message }
 
-    public init(title: String, message: String, recoveryAction: String? = nil) {
+    public init(title: String, message: String, recoveryAction: String? = nil, recoveryURL: URL? = nil) {
         self.id = UUID()
         self.title = title
         self.message = message
         self.recoveryAction = recoveryAction
+        self.recoveryURL = recoveryURL
     }
 }
 
@@ -164,8 +166,8 @@ public struct RecordingSession: Codable, Identifiable, Sendable, Equatable {
     public let createdAt: Date
     public var duration: TimeInterval
     public let captureMode: CaptureMode
-    public let sttEngineID: STTEngineID
-    public let sttModelID: String
+    public internal(set) var sttEngineID: STTEngineID
+    public internal(set) var sttModelID: String
     public var speakerMode: SpeakerMode
     public let notesProviderID: String
     public let notesModelID: String
@@ -179,6 +181,8 @@ public struct RecordingSession: Codable, Identifiable, Sendable, Equatable {
     /// Nil in legacy sessions, which always performed live recognition.
     public var liveTranscriptionEnabled: Bool?
     public var sourceKind: String?
+    public var originalAudioFileName: String?
+    var labelTranscriptCopies: [LabelTranscriptCopy]?
 
     public init(
         id: UUID = UUID(),

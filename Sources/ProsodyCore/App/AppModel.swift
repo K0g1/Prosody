@@ -25,16 +25,26 @@ public final class AppModel: ObservableObject {
     @Published public var processingStatus: ProcessingStatus?
     @Published public var userFacingError: UserFacingError?
     @Published public var selectedSessionID: UUID?
+    @Published var requestedSettingsSection: SettingsSection?
+    @Published var librarySidebarVisible = true
+    @Published var libraryShowDictationRequest = 0
+    @Published var libraryFindRequest = 0
+    @Published var librarySelection: [UUID] = []
+    @Published var isImportingAudio = false
+    @Published var isCompressingAudio = false
+    @Published var audioAssetRevision = 0
     @Published public var lastNotice: String?
     @Published public private(set) var recordingCompletion: RecordingCompletion?
     private var completionDismissal: Task<Void, Never>?
     @Published public private(set) var recoverableSessions: [RecoveryManifest] = []
-    @Published public private(set) var installedModelIDs: Set<String> = []
-    @Published public private(set) var modelStorageUsedBytes: Int64 = 0
-    @Published public private(set) var modelDownloadingID: String?
-    @Published public private(set) var modelDownloadProgress: Double = 0
+    @Published public internal(set) var installedModelIDs: Set<String> = []
+    @Published var cachedModelIDs: Set<String> = []
+    @Published public internal(set) var modelStorageUsedBytes: Int64 = 0
+    @Published public internal(set) var modelDownloadingID: String?
+    @Published public internal(set) var modelDownloadProgress: Double = 0
 
     public lazy var dictation = DictationController(model: self)
+    lazy var softwareUpdates = SoftwareUpdates(model: self)
 
     public let preferences: ProsodyPreferences
 
@@ -42,10 +52,17 @@ public final class AppModel: ObservableObject {
     let supportRootURL: URL
     private let recoveryStore: RecoveryStore
     private let keychainStore = KeychainStore()
-    private let sttRegistry = STTRegistry()
-    private let modelManager = STTModelManager()
+    let transcriptUndoManager: UndoManager = {
+        let manager = UndoManager()
+        manager.levelsOfUndo = 8
+        return manager
+    }()
+    let cliService = CLIService()
+    let modelManager: STTModelManager
+    var modelDownloadTask: Task<Void, Never>?
     private let diarizer: FluidAudioDiarizer
     private var globalHotkeyManager: GlobalHotkeyManager?
+    private var registeredGlobalShortcut: String?
 
     @Published public internal(set) var isTransitioning = false
     @Published public internal(set) var selectedSessionHasNotes = false
@@ -101,6 +118,7 @@ public final class AppModel: ObservableObject {
             ? FileManager.default.temporaryDirectory.appendingPathComponent("Prosody-Demo-Support-\(UUID().uuidString)")
             : ProsodyStorage.applicationSupportDirectory)
         self.supportRootURL = applicationSupport
+        self.modelManager = STTModelManager(rootURL: applicationSupport.appendingPathComponent("Models", isDirectory: true))
         self.recoveryStore = RecoveryStore(
             rootURL: applicationSupport.appendingPathComponent(AppConstants.recoveryFolderName, isDirectory: true)
         )
@@ -124,6 +142,7 @@ public final class AppModel: ObservableObject {
     }
 
     deinit {
+        modelDownloadTask?.cancel()
         transitionTask?.cancel()
         meterTask?.cancel()
         eventTask?.cancel()
@@ -133,7 +152,7 @@ public final class AppModel: ObservableObject {
     }
 
     public var canToggleRecording: Bool {
-        guard !isTransitioning, !dictation.isActive else { return false }
+        guard !isTransitioning, !isImportingAudio, !dictation.isActive else { return false }
         switch recordingState {
         case .idle, .recording, .paused, .completed, .failed:
             return true
@@ -143,7 +162,7 @@ public final class AppModel: ObservableObject {
     }
 
     public var canFinishRecording: Bool {
-        guard !isTransitioning, !dictation.isActive else { return false }
+        guard !isTransitioning, !isImportingAudio, !dictation.isActive else { return false }
         switch recordingState {
         case .recording, .paused: return true
         default: return false
@@ -151,7 +170,7 @@ public final class AppModel: ObservableObject {
     }
 
     public var canBrowseSessions: Bool {
-        !recordingState.isRecording && !recordingState.isBusy && !isTransitioning && !dictation.isActive
+        !recordingState.isRecording && !recordingState.isBusy && !isTransitioning && !isImportingAudio && !dictation.isActive
     }
 
     public var selectedSessionTitle: String {
@@ -207,12 +226,14 @@ public final class AppModel: ObservableObject {
     /// A failed replacement leaves the last valid registration active so a
     /// transiently incomplete text-field edit cannot strand the app.
     public func configureGlobalHotkey() {
+        guard preferences.globalShortcut != registeredGlobalShortcut else { return }
         do {
             let replacement = try GlobalHotkeyManager(shortcut: preferences.globalShortcut) { @MainActor [weak self] in
                 self?.toggleRecording()
             }
             globalHotkeyManager?.stop()
             globalHotkeyManager = replacement
+            registeredGlobalShortcut = preferences.globalShortcut
         } catch {
             lastNotice = error.localizedDescription
         }
@@ -241,15 +262,7 @@ public final class AppModel: ObservableObject {
         AppLogger.permissions.info("Requesting permissions for capture mode \(self.preferences.captureMode.rawValue, privacy: .public)")
         var missing: [String] = []
         if preferences.captureMode.sources.contains(.microphone) {
-            let status = AVCaptureDevice.authorizationStatus(for: .audio)
-            let granted: Bool
-            if status == .authorized {
-                granted = true
-            } else if status == .notDetermined {
-                granted = await requestMicrophoneAccess()
-            } else {
-                granted = false
-            }
+            let granted = await MicrophonePermission.requestIfNeeded()
             AppLogger.permissions.info("Microphone permission result: \(granted, privacy: .public)")
             if !granted { missing.append("Microphone") }
         }
@@ -274,6 +287,7 @@ public final class AppModel: ObservableObject {
         guard canToggleRecording, !recordingState.isRecording else { return }
         recordingSegmentationConfiguration = preferences.transcriptSegmentationConfiguration
         cancelRecordingTasks()
+        transcriptUndoManager.removeAllActions()
         selectionTask?.cancel()
         selectedSessionHasNotes = false
         selectedSessionAudioURLs = []
@@ -312,6 +326,7 @@ public final class AppModel: ObservableObject {
         )
         let labels = preferences.selectedRecordingLabels
         session.labels = labels.map(\.snapshot)
+        session.labelTranscriptCopies = labels.compactMap(\.transcriptCopy)
         session.destinationRootPath = labels.first?.outputFolderPath ?? expandedOutputFolderURL().path
         if let primary = labels.first {
             session.title = RecordingNaming.title(pattern: primary.namingPattern, title: session.title,
@@ -319,7 +334,7 @@ public final class AppModel: ObservableObject {
             session.transcriptFileName = RecordingNaming.transcriptFileName(for: session.title)
         }
         preferences.rememberDestination(path: session.destinationRootPath!, bookmarkData: bookmark(for: URL(fileURLWithPath: session.destinationRootPath!)))
-        session.liveTranscriptionEnabled = preferences.liveTranscription
+        session.liveTranscriptionEnabled = preferences.liveTranscription && selectedSpeechModel.descriptor.supportsStreaming
         session.sourceKind = "recording"
         activeSession = session
         selectedSessionID = session.id
@@ -473,6 +488,7 @@ public final class AppModel: ObservableObject {
     public func selectSession(_ session: SessionSummary) {
         guard canBrowseSessions else { return }
         selectionTask?.cancel()
+        if selectedSessionID != session.id { transcriptUndoManager.removeAllActions() }
         selectedSessionID = session.id
         lastNotice = nil
         guard activeSession?.id != session.id else { return }
@@ -482,7 +498,7 @@ public final class AppModel: ObservableObject {
         selectedSessionHasNotes = false
         selectedSessionAudioURLs = []
         if demoMode && session.folderPath == nil {
-            transcript = Transcript(segments: Self.sampleSegments())
+            transcript = Transcript(segments: Self.sampleSegments(for: session.title))
             liveSegments = transcript.visibleSegments
             return
         }
@@ -517,16 +533,38 @@ public final class AppModel: ObservableObject {
             }
             return edited
         }
-        transcript.segments = transcript.segments.map(rename)
-        liveSegments = liveSegments.map(rename)
+        var edited = transcript
+        edited.segments = edited.segments.map(rename)
+        if edited != transcript { applySpeakerEdit(edited) }
+    }
+
+    private func applySpeakerEdit(_ edited: Transcript) {
+        guard canBrowseSessions, let session = activeSession, session.status == "completed",
+              selectedSessionID == session.id else {
+            // The demo transcript has no saved session.
+            if demoMode, !recordingState.isBusy {
+                transcript = edited
+                liveSegments = edited.visibleSegments
+                lastNotice = "Speaker names updated"
+            }
+            return
+        }
+        let previous = transcript
+        transcriptUndoManager.registerUndo(withTarget: self) { model in
+            MainActor.assumeIsolated {
+                guard model.selectedSessionID == session.id else { return }
+                model.applySpeakerEdit(previous)
+            }
+        }
+        transcriptUndoManager.setActionName("Rename Speakers")
+        transcript = edited
+        liveSegments = edited.visibleSegments
         lastNotice = "Speaker names updated"
-        guard let session = activeSession, session.status == "completed" else { return }
-        let edited = transcript
         isTransitioning = true
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isTransitioning = false }
             await self.persistCurrentSession(session: session, editedTranscript: edited)
+            self.isTransitioning = false
         }
     }
 
@@ -612,11 +650,15 @@ public final class AppModel: ObservableObject {
         preferences.selectedRecordingLabels.first?.outputFolderPath ?? preferences.outputFolderPath
     }
 
-    public func saveRecordingLabel(_ label: RecordingLabel, bookmarkData: Data? = nil) {
+    public func saveRecordingLabel(_ label: RecordingLabel, bookmarkData: Data? = nil, transcriptBookmarkData: Data? = nil) {
         var cleaned = label
         cleaned.name = String(label.name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
         guard !cleaned.name.isEmpty else { return }
         if let path = label.outputFolderPath { preferences.rememberDestination(path: path, bookmarkData: bookmarkData) }
+        if let path = cleaned.transcriptCopy?.folderPath, let transcriptBookmarkData {
+            preferences.transcriptCopyDestinations.removeAll { $0.path == path }
+            preferences.transcriptCopyDestinations.append(.init(path: path, bookmarkData: transcriptBookmarkData))
+        }
         if let index = preferences.recordingLabels.firstIndex(where: { $0.id == label.id }) {
             preferences.recordingLabels[index] = cleaned
         } else { preferences.recordingLabels.append(cleaned) }
@@ -770,62 +812,6 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    public func refreshModelInventory() async {
-        var descriptors = await sttRegistry.availableModels(for: .parakeet)
-        descriptors += await sttRegistry.availableModels(for: .whisper)
-        var installed: Set<String> = []
-        for descriptor in descriptors where await modelManager.isInstalled(descriptor) {
-            installed.insert(descriptor.id)
-        }
-        installedModelIDs = installed
-        modelStorageUsedBytes = await modelManager.storageUsed()
-    }
-
-    public func installModel(_ descriptor: STTModelDescriptor) async {
-        guard descriptor.id == "parakeet-unified" else {
-            lastNotice = "This model adapter is not included in Prosody."
-            return
-        }
-        guard modelDownloadingID == nil else { return }
-
-        modelDownloadingID = descriptor.id
-        modelDownloadProgress = 0
-        defer {
-            modelDownloadingID = nil
-            modelDownloadProgress = 0
-        }
-
-        do {
-            let engine = ParakeetEngine()
-            let progress: @Sendable (Double) -> Void = { [weak self] value in
-                Task { @MainActor [weak self] in
-                    guard let self, self.modelDownloadingID == descriptor.id else { return }
-                    self.modelDownloadProgress = min(max(value, 0), 1)
-                }
-            }
-            try await engine.download(model: descriptor, progress: progress)
-            lastNotice = "\(descriptor.displayName) is ready"
-            await refreshModelInventory()
-            if canBrowseSessions, !demoMode { dictation.prewarmRecognition() }
-        } catch {
-            userFacingError = UserFacingError(title: "Model download failed", message: error.localizedDescription)
-        }
-    }
-
-    public func removeModel(_ descriptor: STTModelDescriptor) async {
-        guard descriptor.id != preferences.sttModelID else {
-            lastNotice = "Select another model before removing this one."
-            return
-        }
-        do {
-            try await modelManager.remove(descriptor)
-            await refreshModelInventory()
-            lastNotice = "\(descriptor.displayName) removed"
-        } catch {
-            userFacingError = UserFacingError(title: "Could not remove model", message: error.localizedDescription)
-        }
-    }
-
     // MARK: - Production recording
 
     private var usesHardwareRecordingFixture: Bool {
@@ -841,8 +827,7 @@ public final class AppModel: ObservableObject {
             await dictation.releaseCachedModel()
             #if DEBUG
             if usesHardwareRecordingFixture {
-                let microphoneReady = !session.captureMode.sources.contains(.microphone)
-                    || AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+                let microphoneReady = !session.captureMode.sources.contains(.microphone) || MicrophonePermission.isGranted
                 let systemReady = !session.captureMode.sources.contains(.system) || CGPreflightScreenCaptureAccess()
                 guard microphoneReady, systemReady else {
                     throw UserFacingError(title: "Capture fixture unavailable",
@@ -851,20 +836,14 @@ public final class AppModel: ObservableObject {
             }
             #endif
             if session.captureMode.sources.contains(.microphone) {
-                let status = AVCaptureDevice.authorizationStatus(for: .audio)
-                let granted: Bool
-                if status == .authorized {
-                    granted = true
-                } else if status == .notDetermined {
-                    granted = await requestMicrophoneAccess()
-                } else {
-                    granted = false
-                }
+                let granted = await MicrophonePermission.requestIfNeeded()
+                try Task.checkCancellation()
                 guard granted else {
                     throw UserFacingError(
                         title: "Microphone permission required",
                         message: "Allow Prosody to use the microphone in System Settings, then try again.",
-                        recoveryAction: "Open System Settings"
+                        recoveryAction: "Open Microphone Settings",
+                        recoveryURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
                     )
                 }
             }
@@ -873,29 +852,20 @@ public final class AppModel: ObservableObject {
                 throw ScreenCaptureCoordinatorError.screenPermissionDenied
             }
             var sttSessions: [AudioSource: any STTSession] = [:]
+            guard session.sttEngineID == .parakeet, let speechModel = SpeechModel(rawValue: session.sttModelID) else {
+                throw STTError.unsupportedModel(session.sttModelID)
+            }
+            // Validate before capture even when transcription is deferred.
+            _ = try await modelManager.installedURL(for: speechModel)
             if session.liveTranscriptionEnabled != false {
-            recordingState = .preparing(.loadingModel(progress: 0))
-            guard session.sttEngineID == .parakeet else {
-                throw STTError.unsupportedModel(session.sttModelID)
-            }
-            guard let model = await sttRegistry.model(id: session.sttModelID, for: .parakeet) else {
-                throw STTError.unsupportedModel(session.sttModelID)
-            }
-            let engine = ParakeetEngine(segmentationConfiguration: recordingSegmentationConfiguration)
-            productionEngine = engine
-            let progress: @Sendable (Double) -> Void = { [weak self] value in
-                Task { @MainActor [weak self] in
-                    guard let self, self.recordingState.statusTitle == "Preparing transcription…" else { return }
-                    self.recordingState = .preparing(.loadingModel(progress: min(max(value, 0), 1)))
+                recordingState = .preparing(.loadingModel(progress: 0))
+                let engine = ParakeetEngine(segmentationConfiguration: recordingSegmentationConfiguration, inventory: modelManager)
+                productionEngine = engine
+                try await engine.prepare(model: speechModel.descriptor) { _ in }
+                try Task.checkCancellation()
+                for source in session.captureMode.sources {
+                    sttSessions[source] = try await engine.makeSession(source: source)
                 }
-            }
-            try await engine.prepare(model: model, progress: progress)
-            try Task.checkCancellation()
-
-            for source in session.captureMode.sources {
-                sttSessions[source] = try await engine.makeSession(source: source)
-            }
-
             }
             try Task.checkCancellation()
             recordingState = .preparing(.startingCapture)
@@ -941,7 +911,8 @@ public final class AppModel: ObservableObject {
             fail(error: UserFacingError(
                 title: "Screen Recording permission required",
                 message: error.localizedDescription,
-                recoveryAction: "Open System Settings"
+                recoveryAction: "Open Screen Recording Settings",
+                recoveryURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
             ))
         } catch {
             await cleanupProduction()
@@ -1061,11 +1032,16 @@ public final class AppModel: ObservableObject {
                 let files = Dictionary(grouping: urls) { url in
                     AudioSource(rawValue: url.deletingLastPathComponent().lastPathComponent) ?? .microphone
                 }
-                finalTranscript = try await AudioFileTranscriber(segmentationConfiguration: recordingSegmentationConfiguration).transcribe(
-                    files: files, speakerMode: activeSession?.speakerMode ?? .basic
+                guard let activeSession else { throw STTError.failed("The active recording is unavailable.") }
+                finalTranscript = try await transcribeAudio(
+                    files: files, session: activeSession, configuration: recordingSegmentationConfiguration
                 ).transcript
             } else {
-                finalTranscript = coordinator == nil ? transcript : await coordinator!.deduplicatedTranscript()
+                if let coordinator {
+                    finalTranscript = await coordinator.deduplicatedTranscript()
+                } else {
+                    finalTranscript = transcript
+                }
             }
             let session = activeSession ?? RecordingSession(
                 title: "New Recording",
@@ -1104,14 +1080,6 @@ public final class AppModel: ObservableObject {
         }
         guard let epochID = productionClock.currentEpochID else { return currentDuration }
         return productionClock.time(forPTS: pts, epochID: epochID)
-    }
-
-    private func requestMicrophoneAccess() async -> Bool {
-        await withCheckedContinuation { continuation in
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
-                continuation.resume(returning: granted)
-            }
-        }
     }
 
     func selectedMicrophoneDeviceID() -> String? {
@@ -1236,10 +1204,11 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    func complete(result: RecordingResult, fallbackSession: RecordingSession) async {
+    func complete(result: RecordingResult, fallbackSession: RecordingSession, announceCompletion: Bool = true,
+                  importedAudio: URL? = nil) async {
         recordingState = .finalizingTranscript
-        try? await Task.sleep(for: .milliseconds(160))
 
+        if importedAudio != nil { recordingWarning = nil }
         var session = result.session
         if session.id != fallbackSession.id {
             session = fallbackSession
@@ -1248,8 +1217,12 @@ public final class AppModel: ObservableObject {
         session.destinationRootPath = fallbackSession.destinationRootPath
         session.transcriptFileName = fallbackSession.transcriptFileName
         session.duration = max(elapsedDuration(at: .now), result.session.duration)
-        var finalTranscript = WordReplacementProcessor(rules: preferences.wordReplacements).apply(to: result.transcript)
-        if finalTranscript.visibleSegments.isEmpty {
+        let replacements = WordReplacementProcessor(rules: preferences.wordReplacements)
+        let recognized = result.transcript
+        let cleaned = preferences.omitFillerWords ? FillerWordFilter().apply(to: recognized) : recognized
+        let initialTranscript = replacements.apply(to: cleaned)
+        var finalTranscript = initialTranscript
+        if recognized.visibleSegments.isEmpty {
             recordingWarning = "No speech was recognized. Check the audio source and try another recording."
         }
 
@@ -1257,7 +1230,7 @@ public final class AppModel: ObservableObject {
         // stopping. Flush every final segment before changing the recovery
         // state so a crash during the remainder of processing still leaves a
         // complete transcript to recover.
-        for segment in finalTranscript.segments {
+        for segment in recognized.segments {
             await appendRecovery(segment)
         }
 
@@ -1275,11 +1248,10 @@ public final class AppModel: ObservableObject {
                 transcript: finalTranscript
             ))
             session.outputFolderPath = directory.path
-            _ = try await persist(document: SessionDocument(session: session, transcript: finalTranscript))
             processingStatus = .saved
 
             let transcriptionWarning = recordingWarning
-            var archiveWarning = audioArchiveWarning
+            var archiveWarning = importedAudio == nil ? audioArchiveWarning : nil
             var archivedAudioURLs: [URL] = []
             if let archiveWriter = audioArchiveWriter {
                 do {
@@ -1293,13 +1265,12 @@ public final class AppModel: ObservableObject {
             if session.speakerMode == .full {
                 recordingState = .diarizing(progress: 0.35)
                 processingStatus = .diarizing(0.35)
-                if let audio = preferredDiarizationAudio(from: archivedAudioURLs) {
+                let source = importedAudio.map { (urls: [$0], source: AudioSource.microphone) }
+                    ?? preferredDiarizationAudio(from: archivedAudioURLs)
+                if let audio = source {
                     do {
-                        finalTranscript = try await applyDiarization(
-                            to: finalTranscript,
-                            audioURLs: audio.urls,
-                            source: audio.source
-                        )
+                        let aligned = try await applyDiarization(to: cleaned, audioURLs: audio.urls, source: audio.source)
+                        finalTranscript = replacements.apply(to: aligned)
                         recordingState = .diarizing(progress: 0.9)
                         processingStatus = .diarizing(0.9)
                     } catch {
@@ -1363,11 +1334,13 @@ public final class AppModel: ObservableObject {
             // optional speaker pass and notes generation. If this rewrite
             // fails, the first transcript commit above is still valid.
             do {
-                _ = try await persist(document: SessionDocument(
-                    session: session,
-                    transcript: finalTranscript,
-                    notesMarkdown: notes
-                ))
+                if notes != nil || finalTranscript != initialTranscript {
+                    _ = try await persist(document: SessionDocument(
+                        session: session,
+                        transcript: finalTranscript,
+                        notesMarkdown: notes
+                    ))
+                }
             } catch {
                 notesWarning = notesWarning ?? error.localizedDescription
             }
@@ -1389,16 +1362,19 @@ public final class AppModel: ObservableObject {
             }
             selectedSessionID = session.id
             refreshSelectedAudio()
-            let warning = [transcriptionWarning, archiveWarning, processingWarning, notesWarning]
+            let copyWarning = await writeLabelTranscriptCopies(SessionDocument(session: session, transcript: finalTranscript))
+            let warning = [transcriptionWarning, archiveWarning, processingWarning, notesWarning, copyWarning]
                 .compactMap { $0 }
                 .first
             selectedSessionHasNotes = notes != nil
-            processingStatus = warning == nil ? .completed : .warning(warning!)
+            processingStatus = warning.map(ProcessingStatus.warning) ?? .completed
             lastNotice = warning
-            announceSavedSession(session.id, message: notes == nil ? "Transcript saved" : "Transcript and notes saved")
             recordingState = .completed(session.id)
-            if session.sourceKind != "dictation" { sendFinishedNotification(title: session.title) }
-            if preferences.automaticallyRevealNotes && notes != nil { openNotes() }
+            if announceCompletion {
+                announceSavedSession(session.id, message: notes == nil ? "Transcript saved" : "Transcript and notes saved")
+                if session.sourceKind != "dictation" { sendFinishedNotification(title: session.title) }
+                if preferences.automaticallyRevealNotes && notes != nil { openNotes() }
+            }
         } catch {
             fail(title: "Could not save session", error: error)
         }
@@ -1591,16 +1567,26 @@ public final class AppModel: ObservableObject {
                     files[source] = try audioChunks(in: recoveryAudioDirectory, source: source)
                 }
                 if files.values.contains(where: { !$0.isEmpty }) {
-                    finalTranscript = try await AudioFileTranscriber(segmentationConfiguration: segmentationConfiguration).transcribe(files: files, speakerMode: session.speakerMode).transcript
+                    if let original = SpeechModel(rawValue: session.sttModelID),
+                       await modelManager.isInstalled(original.descriptor) {
+                        session.sttModelID = original.rawValue
+                    } else {
+                        session.sttModelID = selectedSpeechModel.rawValue
+                    }
+                    session.sttEngineID = .parakeet
+                    finalTranscript = try await transcribeAudio(
+                        files: files, session: session, configuration: segmentationConfiguration
+                    ).transcript
                 }
             }
-            finalTranscript = WordReplacementProcessor(rules: preferences.wordReplacements).apply(to: finalTranscript)
+            let replacements = WordReplacementProcessor(rules: preferences.wordReplacements)
+            let cleaned = preferences.omitFillerWords ? FillerWordFilter().apply(to: finalTranscript) : finalTranscript
+            finalTranscript = replacements.apply(to: cleaned)
             let directory = try await persist(document: SessionDocument(
                 session: session,
                 transcript: finalTranscript
             ))
             session.outputFolderPath = directory.path
-            _ = try await persist(document: SessionDocument(session: session, transcript: finalTranscript))
             processingStatus = .saved
 
             var processingWarning: String?
@@ -1609,11 +1595,8 @@ public final class AppModel: ObservableObject {
                 processingStatus = .diarizing(0.35)
                 if let audio = await preferredRecoveryDiarizationAudio(for: manifest.id) {
                     do {
-                        finalTranscript = try await applyDiarization(
-                            to: finalTranscript,
-                            audioURLs: audio.urls,
-                            source: audio.source
-                        )
+                        let aligned = try await applyDiarization(to: cleaned, audioURLs: audio.urls, source: audio.source)
+                        finalTranscript = replacements.apply(to: aligned)
                         processingStatus = .diarizing(0.9)
                     } catch {
                         finalTranscript = applySourceSpeakerFallback(to: finalTranscript)
@@ -1627,6 +1610,8 @@ public final class AppModel: ObservableObject {
                 liveSegments = finalTranscript.visibleSegments
             }
 
+            let copyWarning = await writeLabelTranscriptCopies(SessionDocument(session: session, transcript: finalTranscript))
+            processingWarning = processingWarning ?? copyWarning
             var notes: String?
             if preferences.generateNotesAutomatically && session.sourceKind != "dictation" {
                 recordingState = .generatingNotes(progress: 0.25)
@@ -1692,7 +1677,7 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    private func loadSummaries() async -> [SessionSummary] {
+    public func loadSummaries() async -> [SessionSummary] {
         var results: [UUID: SessionSummary] = [:]
         for preferred in libraryRoots {
             if let summaries = try? await SecurityScopedFolder.withAccess(to: preferred, bookmarkData: bookmark(for: preferred), operation: { resolved in
@@ -1711,7 +1696,7 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    func loadDocument(id: UUID) async -> SessionDocument? {
+    public func loadDocument(id: UUID) async -> SessionDocument? {
         for preferred in libraryRoots {
             if let document = try? await SecurityScopedFolder.withAccess(to: preferred, bookmarkData: bookmark(for: preferred), operation: { resolved in
                 let document = try await SessionStore(rootURL: resolved).load(id: id)
@@ -1931,8 +1916,23 @@ public final class AppModel: ObservableObject {
         ]
     }
 
-    private static func sampleSegments() -> [TranscriptSegment] {
-        [
+    private static func sampleSegments(for title: String? = nil) -> [TranscriptSegment] {
+        switch title {
+        case "Backpropagation Explained":
+            return [
+                TranscriptSegment(source: .system, start: 0, end: 5, text: "First, compare the prediction with the target and calculate the loss.", isFinal: true, speakerName: "Instructor"),
+                TranscriptSegment(source: .system, start: 6, end: 11, text: "Use the chain rule to trace how each layer contributed to that loss.", isFinal: true, speakerName: "Instructor"),
+                TranscriptSegment(source: .system, start: 12, end: 17, text: "Update the parameters using the resulting gradients, then run a new pass.", isFinal: true, speakerName: "Instructor")
+            ]
+        case "Study Group Discussion":
+            return [
+                TranscriptSegment(source: .microphone, start: 0, end: 4, text: "Let's use the first practice problem to compare approaches.", isFinal: true, speakerName: "You"),
+                TranscriptSegment(source: .system, start: 5, end: 10, text: "I drew the dependency graph first so I could follow the chain rule.", isFinal: true, speakerName: "Study partner"),
+                TranscriptSegment(source: .microphone, start: 11, end: 16, text: "We'll each solve the next problem and compare our answers.", isFinal: true, speakerName: "You")
+            ]
+        default: break
+        }
+        return [
             TranscriptSegment(source: .system, start: 12, end: 18, text: "Today, we'll explore how neural networks are inspired by the structure of the human brain.", isFinal: true, speakerID: "speaker-1", speakerName: "Professor"),
             TranscriptSegment(source: .microphone, start: 19, end: 25, text: "Could you explain how backpropagation works?", isFinal: true, speakerID: "you", speakerName: "You"),
             TranscriptSegment(source: .system, start: 26, end: 34, text: "Of course. It's how the network learns by minimizing error through gradient descent.", isFinal: true, speakerID: "speaker-1", speakerName: "Professor"),

@@ -51,7 +51,7 @@ struct NotesSettingsView: SettingsSearchPage {
               help: "Create notes after transcription and any speaker pass.",
               keywords: ["summaries", "automatic notes"]) { pane, entry in
             Toggle(entry.title, isOn: pane.$preferences.generateNotesAutomatically)
-                .labelsHidden().toggleStyle(.switch)
+                .labelsHidden().toggleStyle(.prosodySwitch)
         },
         .init("clippy.settings.notes.provider", "Provider",
               help: "Offline Outline needs no AI model. Use a server provider to configure a model and connection.",
@@ -167,105 +167,6 @@ struct NotesSettingsView: SettingsSearchPage {
             }
         }
         .disabled(!usesServer)
-    }
-}
-
-struct ModelsSettingsView: SettingsSearchPage {
-    @Environment(\.prosodyPalette) private var palette
-    @ObservedObject var model: AppModel
-    @ObservedObject var preferences: ProsodyPreferences
-    @State private var downloadTask: Task<Void, Never>?
-
-    private static let speechModel = STTModelDescriptor(
-        id: "parakeet-unified", engineID: .parakeet, displayName: "Parakeet Unified",
-        languages: ["English", "Streaming"], supportsStreaming: true, supportsWordTimestamps: true,
-        estimatedDownloadBytes: 565_000_000
-    )
-
-    private static let manageModel = SettingsControl<Self>.custom(
-        "clippy.settings.model.parakeet-unified", speechModel.displayName,
-        keywords: ["speech model", "install", "download", "remove", "delete", "storage", "English"]
-    ) { pane, entry in
-        let model = Self.speechModel
-        let downloading = pane.model.modelDownloadingID == model.id
-        ModelSettingsRow(
-            model: model, isInstalled: pane.model.installedModelIDs.contains(model.id),
-            isSelected: pane.preferences.sttModelID == model.id,
-            downloadProgress: downloading ? pane.model.modelDownloadProgress : nil,
-            accessibilityID: entry.id,
-            toggle: { pane.toggleDownload(model) }
-        )
-    }
-
-    static var controlsForSearch: [SettingsSearchEntry] { [manageModel.entry] }
-
-    init(model: AppModel) {
-        self.model = model
-        preferences = model.preferences
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            SettingsPageHeader(title: "Models")
-            SettingsCard { Self.manageModel.render(in: self) }
-            Text("Storage used by models: \(ByteCountFormatter.string(fromByteCount: model.modelStorageUsedBytes, countStyle: .file))")
-                .font(.caption).foregroundStyle(palette.secondary)
-        }
-        .task { await model.refreshModelInventory() }
-    }
-
-    private func toggleDownload(_ descriptor: STTModelDescriptor) {
-        if model.modelDownloadingID == descriptor.id {
-            downloadTask?.cancel()
-            downloadTask = nil
-            return
-        }
-        guard model.modelDownloadingID == nil else { return }
-        downloadTask = Task { @MainActor in
-            if model.installedModelIDs.contains(descriptor.id) {
-                await model.removeModel(descriptor)
-            } else {
-                await model.installModel(descriptor)
-            }
-            downloadTask = nil
-        }
-    }
-}
-
-private struct ModelSettingsRow: View {
-    @Environment(\.prosodyPalette) private var palette
-    let model: STTModelDescriptor
-    let isInstalled: Bool
-    let isSelected: Bool
-    let downloadProgress: Double?
-    let accessibilityID: String
-    let toggle: () -> Void
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: "cpu").foregroundStyle(palette.accent).accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(model.displayName).font(.callout.weight(.medium))
-                Text("\(model.languages.joined(separator: " · ")) · \(model.downloadSizeLabel)")
-                    .font(.caption).foregroundStyle(palette.secondary)
-            }
-            Spacer()
-            if let progress = downloadProgress {
-                ProgressView(value: progress, total: 1)
-                    .frame(width: 90)
-                    .accessibilityLabel("Downloading \(model.displayName)")
-                Button("Cancel", action: toggle)
-            } else if isSelected && isInstalled {
-                Text("Selected").font(.callout).foregroundStyle(palette.accent)
-                    .settingsHelp("The selected model can’t be removed.")
-                    .accessibilityIdentifier(accessibilityID)
-            } else {
-                Button(isInstalled ? "Remove" : "Download", action: toggle)
-                    .settingsHelp(isInstalled ? "Delete the local model files. Saved recordings and transcripts stay in place." : nil)
-                    .accessibilityIdentifier(accessibilityID)
-            }
-        }
-        .padding(16)
     }
 }
 

@@ -262,7 +262,7 @@ struct RecordingLabelSelectionView: View {
         .preferredColorScheme(forNewRecording && !preferences.theme.isAdaptive ? (palette.dark ? .dark : .light) : nil)
         .background {
             if forNewRecording {
-                ThemeBackground(palette: palette, isAdaptive: preferences.theme.isAdaptive, backdrop: .systemPopover)
+                ThemeBackground(palette: palette, material: preferences.theme.material, backdrop: .systemPopover)
             } else {
                 ThemeBackground(palette: palette)
             }
@@ -289,7 +289,7 @@ struct RecordingLabelSelectionView: View {
                 RecordingLabelBadge(label: label)
                     .truncationMode(.middle)
             }
-            .toggleStyle(.checkbox)
+            .toggleStyle(.prosodyCheckbox)
             .accessibilityLabel(label.name)
             .accessibilityIdentifier("clippy.recording.labels.choice.\(label.id.uuidString)")
 

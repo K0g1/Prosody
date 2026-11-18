@@ -46,10 +46,10 @@ public struct CapturedAudioPacket: Sendable, Equatable {
     }
 }
 
-/// ScreenCaptureKit owns the actual macOS capture stream. It emits copied,
-/// Sendable PCM packets so the rest of the app never passes framework-owned
-/// sample buffers across actors. Each instance owns one packet stream.
-public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+/// Owns one native capture and emits copied, Sendable PCM packets. AVFoundation
+/// handles microphone-only capture, and ScreenCaptureKit handles system audio.
+public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamDelegate,
+    AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
     public nonisolated let packets: AsyncThrowingStream<CapturedAudioPacket, Error>
 
     private let packetContinuation: AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation
@@ -60,7 +60,18 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
     private var pendingPackets = 0
 
 #if canImport(ScreenCaptureKit)
-    private var stream: SCStream?
+    private enum Backend {
+        case screen(SCStream)
+        case microphone(MicrophoneCapture)
+
+        var producerID: ObjectIdentifier {
+            switch self {
+            case .screen(let stream): ObjectIdentifier(stream)
+            case .microphone(let mic): ObjectIdentifier(mic.output)
+            }
+        }
+    }
+    private var backend: Backend?
     private var starting = false
     private var startTask: Task<Void, Error>?
     private var stopTask: Task<Void, Never>?
@@ -110,37 +121,18 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
             }
         }
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let backend: Backend
+            if mode == .microphone {
+                backend = .microphone(try MicrophoneCapture(
+                    deviceID: microphoneDeviceID, delegate: self, sampleQueue: microphoneOutputQueue
+                ) { [weak self] producer, failure in
+                    self?.captureDidFail(producer: producer, failure: failure)
+                })
+            } else {
+                backend = .screen(try await makeScreenStream(mode: mode, microphoneDeviceID: microphoneDeviceID))
+            }
             try Task.checkCancellation()
-            guard let display = content.displays.first else { throw ScreenCaptureCoordinatorError.noDisplay }
-            let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
-            let configuration = SCStreamConfiguration()
-            configuration.width = 2
-            configuration.height = 2
-            configuration.queueDepth = 3
-            configuration.capturesAudio = mode.sources.contains(.system)
-            configuration.captureMicrophone = mode.sources.contains(.microphone)
-            configuration.microphoneCaptureDeviceID = microphoneDeviceID
-            configuration.sampleRate = 48_000
-            configuration.channelCount = 2
-            configuration.excludesCurrentProcessAudio = true
-
-            let newStream = SCStream(filter: filter, configuration: configuration, delegate: self)
-            if mode.sources.contains(.system) {
-                try newStream.addStreamOutput(
-                    self,
-                    type: SCStreamOutputType.audio,
-                    sampleHandlerQueue: systemOutputQueue
-                )
-            }
-            if mode.sources.contains(.microphone) {
-                try newStream.addStreamOutput(
-                    self,
-                    type: SCStreamOutputType.microphone,
-                    sampleHandlerQueue: microphoneOutputQueue
-                )
-            }
-            let startup = try install(stream: newStream, mode: mode)
+            let startup = try install(backend: backend, mode: mode)
             do {
                 try await startup.value
                 try Task.checkCancellation()
@@ -166,8 +158,8 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
 
     public func pause() async throws {
 #if canImport(ScreenCaptureKit)
-        let (activeStream, mode) = try activeCapture()
-        try await stopCapture(activeStream)
+        let (backend, mode) = try activeCapture()
+        try await stopCapture(backend)
         // Drain framework callbacks and the consumer before closing the clock
         // epoch. Otherwise a pause discards the audio waiting behind inference.
         await drainOutputCallbacks(sources: mode.sources)
@@ -181,8 +173,8 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
 
     public func resume() async throws {
 #if canImport(ScreenCaptureKit)
-        let (activeStream, _) = try activeCapture()
-        try await startCapture(activeStream)
+        let (backend, _) = try activeCapture()
+        try await startCapture(backend)
 #else
         throw ScreenCaptureCoordinatorError.unavailable
 #endif
@@ -211,15 +203,39 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
     }
 
 #if canImport(ScreenCaptureKit)
+    private func makeScreenStream(mode: CaptureMode, microphoneDeviceID: String?) async throws -> SCStream {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        try Task.checkCancellation()
+        guard let display = content.displays.first else { throw ScreenCaptureCoordinatorError.noDisplay }
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        let configuration = SCStreamConfiguration()
+        configuration.width = 2
+        configuration.height = 2
+        configuration.queueDepth = 3
+        configuration.capturesAudio = true
+        configuration.captureMicrophone = mode.sources.contains(.microphone)
+        configuration.microphoneCaptureDeviceID = microphoneDeviceID
+        configuration.sampleRate = 48_000
+        configuration.channelCount = 2
+        configuration.excludesCurrentProcessAudio = true
+
+        let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
+        try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: systemOutputQueue)
+        if configuration.captureMicrophone {
+            try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: microphoneOutputQueue)
+        }
+        return stream
+    }
+
     private func stopAndFinish(drainOutputQueues: Bool) async {
-        let (activeStream, mode, startup) = lock.withLock { (stream, currentMode, startTask) }
+        let (backend, mode, startup) = lock.withLock { (self.backend, currentMode, startTask) }
         // If startup has reached the framework, let its request complete before
         // stopping. Otherwise a late start could leave a closed stream capturing.
         _ = await startup?.result
         var stopFailure: ScreenCaptureCoordinatorError?
-        if let activeStream {
+        if let backend {
             do {
-                try await stopCapture(activeStream)
+                try await stopCapture(backend)
             } catch let error as SCStreamError where error.code == .attemptToStopStreamState {
                 // A paused stream is already stopped.
             } catch {
@@ -230,7 +246,7 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
             await drainOutputCallbacks(sources: mode?.sources ?? AudioSource.allCases)
         }
         let failure = lock.withLock {
-            stream = nil
+            self.backend = nil
             currentMode = nil
             return streamFailure ?? stopFailure
         }
@@ -246,21 +262,17 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
         }
     }
 
-    private func startCapture(_ stream: SCStream) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            stream.startCapture { error in
-                if let error { continuation.resume(throwing: error) }
-                else { continuation.resume() }
-            }
+    private func startCapture(_ backend: Backend) async throws {
+        switch backend {
+        case .screen(let stream): try await stream.startCapture()
+        case .microphone(let microphone): try await microphone.start()
         }
     }
 
-    private func stopCapture(_ stream: SCStream) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            stream.stopCapture { error in
-                if let error { continuation.resume(throwing: error) }
-                else { continuation.resume() }
-            }
+    private func stopCapture(_ backend: Backend) async throws {
+        switch backend {
+        case .screen(let stream): try await stream.stopCapture()
+        case .microphone(let microphone): await microphone.stop()
         }
     }
 
@@ -272,24 +284,31 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
         default: return
         }
         guard let packet = Self.packet(from: sampleBuffer, source: source) else { return }
-        enqueue(packet, from: stream)
+        enqueue(packet, producer: ObjectIdentifier(stream))
+    }
+
+    public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let packet = Self.packet(from: sampleBuffer, source: .microphone) else { return }
+        enqueue(packet, producer: ObjectIdentifier(output))
     }
 
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
-        let failure = ScreenCaptureCoordinatorError.startFailed(error.localizedDescription)
+        captureDidFail(producer: ObjectIdentifier(stream), failure: .startFailed(error.localizedDescription))
+    }
+
+    private func captureDidFail(producer: ObjectIdentifier, failure: ScreenCaptureCoordinatorError) {
         let shouldFinish = lock.withLock { () -> Bool? in
-            guard self.stream === stream, streamFailure == nil else { return nil }
+            guard backend?.producerID == producer, streamFailure == nil else { return nil }
             streamFailure = failure
             // During a normal stop the stop task owns stream termination,
             // including delivering this error after fencing the queues.
             guard stopTask == nil else { return false }
             currentMode = nil
-            self.stream = nil
             return true
         }
         guard let shouldFinish else { return }
         if shouldFinish { packetContinuation.finish(throwing: failure) }
-        AppLogger.capture.error("ScreenCaptureKit stopped: \(error.localizedDescription, privacy: .public)")
+        AppLogger.capture.error("Capture stopped: \(failure.localizedDescription, privacy: .private)")
     }
 
     private static func packet(from sampleBuffer: CMSampleBuffer, source: AudioSource) -> CapturedAudioPacket? {
@@ -372,9 +391,9 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
 #endif
 
     @discardableResult
-    private func enqueue(_ packet: CapturedAudioPacket, from producer: SCStream? = nil) -> Bool {
+    private func enqueue(_ packet: CapturedAudioPacket, producer: ObjectIdentifier? = nil) -> Bool {
         let accepted = lock.withLock {
-            if let producer, stream !== producer { return false }
+            if let producer, backend?.producerID != producer || streamFailure != nil { return false }
             pendingPackets += 1
             return true
         }
@@ -423,29 +442,29 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
     }
 
 #if canImport(ScreenCaptureKit)
-    private func activeCapture() throws -> (SCStream, CaptureMode) {
+    private func activeCapture() throws -> (Backend, CaptureMode) {
         try lock.withLock {
-            guard let stream, let currentMode, stopTask == nil, streamFailure == nil else {
+            guard let backend, let currentMode, stopTask == nil, streamFailure == nil else {
                 throw ScreenCaptureCoordinatorError.notRunning
             }
-            return (stream, currentMode)
+            return (backend, currentMode)
         }
     }
 
     private func reserveStart() throws {
         try lock.withLock {
             guard stopTask == nil, streamFailure == nil else { throw ScreenCaptureCoordinatorError.notRunning }
-            guard !starting, stream == nil else { throw ScreenCaptureCoordinatorError.alreadyRunning }
+            guard !starting, backend == nil else { throw ScreenCaptureCoordinatorError.alreadyRunning }
             starting = true
         }
     }
 
-    private func install(stream: SCStream, mode: CaptureMode) throws -> Task<Void, Error> {
+    private func install(backend: Backend, mode: CaptureMode) throws -> Task<Void, Error> {
         try lock.withLock {
             guard stopTask == nil else { throw CancellationError() }
-            self.stream = stream
+            self.backend = backend
             currentMode = mode
-            let task = Task { try await startCapture(stream) }
+            let task = Task { try await startCapture(backend) }
             startTask = task
             return task
         }

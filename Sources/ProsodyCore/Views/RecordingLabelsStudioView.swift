@@ -45,14 +45,22 @@ struct RecordingLabelsStudioView: View {
         pane.folderField
     }
 
+    private static let transcriptCopyControl = SettingsControl<Self>.custom(
+        "clippy.settings.labels.transcript-copy", "Transcript Copies",
+        keywords: ["export", "raw text", "markdown", "save transcript", "folder"]
+    ) { pane, _ in
+        if let draft = pane.selectedDraft { pane.transcriptCopyGroup(draft) }
+    }
+
     static var searchEntries: [SettingsSearchEntry] {
-        [nameControl.entry, colorControl.entry, folderControl.entry]
+        [nameControl.entry, colorControl.entry, folderControl.entry, transcriptCopyControl.entry]
     }
 
     private static let fieldSearchIDs = [
         "clippy.settings.labels.name",
         "clippy.settings.labels.color",
-        "clippy.settings.labels.folder"
+        "clippy.settings.labels.folder",
+        "clippy.settings.labels.transcript-copy"
     ]
 
     init(model: AppModel) {
@@ -225,6 +233,8 @@ struct RecordingLabelsStudioView: View {
                 Self.folderControl.render(in: self)
             }
 
+            Self.transcriptCopyControl.render(in: self)
+
             if !labelDrafts.newLabelIDs.contains(id) {
                 dangerSection(draft)
             }
@@ -311,7 +321,7 @@ struct RecordingLabelsStudioView: View {
                 .help(currentFolderPath)
                 .accessibilityIdentifier("clippy.label.folder.path")
             HStack(spacing: 8) {
-                Button("Choose Folder…", action: chooseFolder)
+                Button("Choose Folder…") { chooseFolder() }
                     .accessibilityLabel("Choose save folder for \(selectedDraft?.name ?? "label")")
                     .accessibilityIdentifier("clippy.label.folder.choose")
                     .help("Choose where future recordings with this label are saved.")
@@ -581,9 +591,10 @@ struct RecordingLabelsStudioView: View {
 
     private func saveDraft() {
         guard let id = labelDrafts.selectedID, let draft = selectedDraft, validation == nil else { return }
-        model.saveRecordingLabel(draft, bookmarkData: labelDrafts.bookmarks[id])
+        model.saveRecordingLabel(draft, bookmarkData: labelDrafts.bookmarks[id], transcriptBookmarkData: labelDrafts.transcriptBookmarks[id])
         labelDrafts.drafts[id] = nil
         labelDrafts.bookmarks[id] = nil
+        labelDrafts.transcriptBookmarks[id] = nil
         if labelDrafts.newLabelIDs.contains(id) { labelDrafts.selectionBeforeNew = nil }
         labelDrafts.newLabelIDs.remove(id)
         labelDrafts.newLabelOrder.removeAll { $0 == id }
@@ -598,6 +609,7 @@ struct RecordingLabelsStudioView: View {
         } else {
             labelDrafts.drafts[id] = nil
             labelDrafts.bookmarks[id] = nil
+            labelDrafts.transcriptBookmarks[id] = nil
             folderError = nil
         }
     }
@@ -605,6 +617,7 @@ struct RecordingLabelsStudioView: View {
     private func cancelNewLabel(_ id: UUID) {
         labelDrafts.drafts[id] = nil
         labelDrafts.bookmarks[id] = nil
+        labelDrafts.transcriptBookmarks[id] = nil
         labelDrafts.newLabelIDs.remove(id)
         labelDrafts.newLabelOrder.removeAll { $0 == id }
         if labelDrafts.selectedID == id {
@@ -616,7 +629,38 @@ struct RecordingLabelsStudioView: View {
         folderError = nil
     }
 
-    private func chooseFolder() {
+    private func transcriptCopyGroup(_ draft: RecordingLabel) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SettingsGroupTitle(title: "Transcript Copies")
+            Text("Save a separate copy when a new transcript has this label.")
+                .font(.caption).foregroundStyle(palette.secondary)
+            HStack {
+                Text(draft.transcriptCopy?.folderPath ?? "No copy folder selected")
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Button("Choose Folder…") { chooseFolder(forTranscript: true) }
+                    .help("Choose where to save a transcript-only copy")
+                if draft.transcriptCopy != nil {
+                    Button("Remove") { updateSelectedDraft { $0.transcriptCopy = nil } }
+                        .help("Stop saving separate transcript copies for this label")
+                }
+            }
+            if let copy = draft.transcriptCopy {
+                Picker("Copy Format", selection: Binding(
+                    get: { selectedDraft?.transcriptCopy?.format ?? copy.format },
+                    set: { format in updateSelectedDraft { $0.transcriptCopy?.format = format } }
+                )) {
+                    ForEach(TranscriptCopyFormat.allCases) { Text($0.title).tag($0) }
+                }
+                .help("Text-only Markdown and Raw Text include speech without timestamps or metadata")
+            }
+            if let folderError {
+                Text(folderError).font(.caption).foregroundStyle(palette.secondary)
+            }
+        }
+    }
+
+    private func chooseFolder(forTranscript: Bool = false) {
         guard let id = labelDrafts.selectedID else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -624,12 +668,21 @@ struct RecordingLabelsStudioView: View {
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
         panel.prompt = "Choose"
-        panel.message = "Choose the save folder for recordings with this label."
+        panel.message = forTranscript
+            ? "Choose a folder for transcript copies with this label."
+            : "Choose the save folder for recordings with this label."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let data = try SecurityScopedFolder.bookmarkData(for: url)
-            updateSelectedDraft { $0.outputFolderPath = url.path }
-            labelDrafts.bookmarks[id] = data
+            if forTranscript {
+                updateSelectedDraft {
+                    $0.transcriptCopy = LabelTranscriptCopy(folderPath: url.path, format: $0.transcriptCopy?.format ?? .markdown)
+                }
+                labelDrafts.transcriptBookmarks[id] = data
+            } else {
+                updateSelectedDraft { $0.outputFolderPath = url.path }
+                labelDrafts.bookmarks[id] = data
+            }
             folderError = nil
         } catch {
             folderError = error.localizedDescription
@@ -647,6 +700,7 @@ struct RecordingLabelsStudioView: View {
         let id = label.id
         labelDrafts.drafts[id] = nil
         labelDrafts.bookmarks[id] = nil
+        labelDrafts.transcriptBookmarks[id] = nil
         labelDrafts.newLabelIDs.remove(id)
         labelDrafts.newLabelOrder.removeAll { $0 == id }
         labelDrafts.selectionBeforeNew = nil
