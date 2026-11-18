@@ -30,7 +30,9 @@ APPROVED_EMAILS = {
 
 def tracked_files() -> list[Path]:
     result = subprocess.run(
-        ["git", "ls-files", "-z"], check=True, capture_output=True
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        check=True,
+        capture_output=True,
     )
     return [Path(item.decode()) for item in result.stdout.split(b"\0") if item]
 

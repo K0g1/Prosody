@@ -115,7 +115,7 @@ forced to replay two AAC chunks. A 240 ms tap and 700 ms of digital silence
 produced no text. No speech trial unexpectedly fell back to replay.
 
 In an acoustic test, the built-in microphone picked up the short command,
-Clippy dispatched paste 187 ms after capture ended, and the native test
+Prosody dispatched paste 187 ms after capture ended, and the native test
 editor received it about 52 ms later. In a separate physical shortcut test,
 it took 407 ms to dispatch, including time for the shortcut modifiers to
 clear, and another 16 ms for the editor to receive it. These are individual
