@@ -158,6 +158,35 @@ final class DictationShortcutTests: XCTestCase {
         XCTAssertEqual(input.keyEvent(.keyDown, key: space, flags: chord), Decision(changed: true, consumed: true))
     }
 
+    func testMissedSpaceReleaseClearsAnOutstandingGesture() {
+        let space = Int64(kVK_Space)
+        var input = DictationShortcutInput(shortcut: .controlOptionSpace)
+        _ = input.keyEvent(.keyDown, key: space, flags: chord)
+        XCTAssertTrue(input.tracksRelease)
+        XCTAssertFalse(input.recoverMissingReleases(shortcutKeyDown: true, escapeKeyDown: false, flags: chord))
+        XCTAssertTrue(input.recoverMissingReleases(shortcutKeyDown: false, escapeKeyDown: false, flags: chord))
+        XCTAssertFalse(input.tracksRelease)
+        XCTAssertEqual(input.keyEvent(.keyDown, key: space, flags: chord), Decision(changed: true, consumed: true))
+    }
+
+    func testMissedModifierReleaseStillConsumesTheClaimedSpaceUp() {
+        let space = Int64(kVK_Space)
+        var input = DictationShortcutInput(shortcut: .controlOptionSpace)
+        _ = input.keyEvent(.keyDown, key: space, flags: chord)
+        XCTAssertTrue(input.recoverMissingReleases(shortcutKeyDown: true, escapeKeyDown: false, flags: .maskAlternate))
+        XCTAssertFalse(input.recoverMissingReleases(shortcutKeyDown: true, escapeKeyDown: false, flags: .maskAlternate))
+        XCTAssertEqual(input.keyEvent(.keyUp, key: space, flags: []), Decision(consumed: true))
+        XCTAssertFalse(input.tracksRelease)
+    }
+
+    func testMissingRightModifierReleaseRearmsTheShortcut() {
+        let keys = ModifierKeys.command
+        var input = DictationShortcutInput(shortcut: keys.shortcut)
+        XCTAssertEqual(input.keyEvent(.flagsChanged, key: keys.rightKey, flags: keys.both), Decision(changed: true))
+        XCTAssertTrue(input.recoverMissingReleases(shortcutKeyDown: false, escapeKeyDown: false, flags: keys.leftOnly))
+        XCTAssertEqual(input.keyEvent(.flagsChanged, key: keys.rightKey, flags: keys.both), Decision(changed: true))
+    }
+
     private struct ModifierKeys {
         let shortcut: DictationShortcut
         let leftKey: Int64

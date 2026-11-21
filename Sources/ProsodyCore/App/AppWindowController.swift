@@ -26,8 +26,9 @@ public final class AppWindowController: NSObject, NSWindowDelegate, NSMenuItemVa
         statusItem = item
         popover.behavior = .transient
         popover.animates = true
+        let model = self.model
         popover.contentViewController = NSHostingController(rootView: ThemedRoot(preferences: model.preferences, expands: false, backdrop: .systemPopover) {
-            MenuBarRootView(model: self.model)
+            MenuBarRootView(model: model)
         })
         model.preferences.$theme.removeDuplicates().sink { [weak self] theme in
             let appearance = theme.isAdaptive ? nil : NSAppearance(named: theme.palette.dark ? .darkAqua : .aqua)

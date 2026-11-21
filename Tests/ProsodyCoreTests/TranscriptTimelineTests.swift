@@ -1,3 +1,4 @@
+#if canImport(XCTest)
 import Combine
 import Foundation
 import XCTest
@@ -194,6 +195,33 @@ final class TranscriptTimelineTests: XCTestCase {
         ))
     }
 
+    @MainActor
+    func testFinalScrubHighlightPersistsThroughTicksWhenFollowIsOff() async throws {
+        let timeline = TranscriptTimeline(segments: [
+            segment(start: 0, end: 1, text: "First"),
+            segment(start: 1, end: 2, text: "Preview"),
+            segment(start: 2, end: 3, text: "Committed"),
+            segment(start: 3, end: 4, text: "Playing")
+        ])
+        let controller = TranscriptFollowController()
+        controller.update(time: 0.5, timeline: timeline)
+        controller.update(time: 1.5, timeline: timeline, minimumInterval: .milliseconds(100))
+        controller.finishScrub(at: 2.5, timeline: timeline)
+        let committed = try XCTUnwrap(controller.directive)
+        XCTAssertEqual(committed.rowID, timeline.rows[2].id)
+        XCTAssertFalse(committed.shouldAnimate)
+
+        controller.updateFromPlayback(
+            time: 3.5, timeline: timeline, autoFollow: false,
+            isPlaying: true, isScrubbing: false, isSearchActive: false
+        )
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertEqual(controller.directive, committed)
+
+        controller.suspend()
+        XCTAssertNil(controller.directive)
+    }
+
     func testFollowCoalescerKeepsTheLatestRapidDirective() {
         let start = ContinuousClock.now
         var coalescer = TranscriptFollowCoalescer(minimumInterval: .milliseconds(40))
@@ -310,3 +338,4 @@ final class TranscriptTimelineTests: XCTestCase {
         )
     }
 }
+#endif

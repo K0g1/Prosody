@@ -55,7 +55,7 @@ public struct MenuBarRootView: View {
     }
 
     private var recovery: RecoveryManifest? {
-        guard !state.isBusy, !state.isRecording else { return nil }
+        guard model.canManageRecovery else { return nil }
         return model.recoverableSessions.first
     }
 

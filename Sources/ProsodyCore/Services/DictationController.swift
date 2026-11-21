@@ -131,12 +131,7 @@ public final class DictationController: ObservableObject {
                 _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
             },
             makeShortcutMonitor: @escaping @MainActor (DictationShortcut, DictationShortcutMonitorCallbacks) -> any DictationShortcutMonitoring = { shortcut, callbacks in
-                DictationShortcutMonitor(
-                    shortcut: shortcut,
-                    changed: callbacks.changed,
-                    cancel: callbacks.cancel,
-                    resetGesture: callbacks.resetGesture
-                )
+                DictationShortcutMonitor(shortcut: shortcut, callbacks: callbacks)
             },
             copyText: @escaping @MainActor (String) -> Void = { DictationTextDestination.copy($0) },
             canPrewarmRecognition: @escaping @MainActor () -> Bool = {
@@ -222,7 +217,8 @@ public final class DictationController: ObservableObject {
         dependencies = Dependencies(
             canStart: { [weak model] in
                 guard let model else { return false }
-                return !model.recordingState.isRecording && !model.recordingState.isBusy && !model.isTransitioning && !model.isImportingAudio
+                return !model.isPreparingToTerminate && !model.recordingState.isRecording && !model.recordingState.isBusy
+                    && !model.isTransitioning && !model.isImportingAudio
             },
             preferences: { [weak model] in
                 guard let model else { return .init() }
@@ -281,6 +277,7 @@ public final class DictationController: ObservableObject {
     }
 
     public func configureShortcut(requestPermission: Bool = false) {
+        guard model?.isPreparingToTerminate != true else { return }
         if requestPermission { dependencies.requestAccessibilityPermission() }
         let desired = ShortcutConfiguration(
             shortcut: dependencies.shortcut(),
@@ -336,6 +333,10 @@ public final class DictationController: ObservableObject {
             },
             resetGesture: { [weak self] in
                 self?.setGestureHeld(false)
+            },
+            availabilityChanged: { [weak self] isReady in
+                guard let self, self.shortcutReady != isReady else { return }
+                self.shortcutReady = isReady
             }
         )
         let newMonitor = dependencies.makeShortcutMonitor(desired.shortcut, callbacks)
@@ -440,6 +441,23 @@ public final class DictationController: ObservableObject {
         pendingFailure = nil
         resultConfirmation = "Copied to clipboard"
         message = resultConfirmation ?? "Copied to clipboard"
+    }
+
+    var hasPendingShutdownWork: Bool {
+        !allSessions.isEmpty || finalizationTask != nil || cleanupInFlight > 0
+    }
+
+    func prepareForTermination() async {
+        stopMonitoring()
+        let startTask = captureSession?.startTask
+        finishCurrentSession()
+        await startTask?.value
+        while hasPendingShutdownWork {
+            await finalizationTask?.value
+            if hasPendingShutdownWork {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
     }
 
     public func stopMonitoring() {

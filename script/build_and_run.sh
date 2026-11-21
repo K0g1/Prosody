@@ -11,7 +11,7 @@ CONFIGURATION="${PROSODY_BUILD_CONFIGURATION:-${CLIPPY_BUILD_CONFIGURATION:-debu
 SIGNING_IDENTITY="${PROSODY_SIGNING_IDENTITY:-${CLIPPY_SIGNING_IDENTITY:-}}"
 if [[ -z "$SIGNING_IDENTITY" ]]; then
   SIGNING_IDENTITY="$(/usr/bin/security find-identity -p codesigning -v 2>/dev/null \
-    | sed -n 's/.*"\(Apple Development:.*\)".*/\1/p' | head -n 1)"
+    | awk -F '"' '$2 ~ /^Apple Development:/ && !found { print $2; found = 1 }')"
   if [[ -z "$SIGNING_IDENTITY" ]]; then
     SIGNING_IDENTITY="-"
   fi

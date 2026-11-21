@@ -6,6 +6,7 @@ public struct OpenAICompatibleProvider: NotesProvider {
     public let apiKey: String?
     public let localOnly: Bool
     private let session: URLSession
+    private static let maximumResponseBytes = 4 * 1024 * 1024
 
     public init(
         id: String = "local-openai-compatible",
@@ -43,14 +44,7 @@ public struct OpenAICompatibleProvider: NotesProvider {
         }
         urlRequest.httpBody = try JSONEncoder().encode(body)
 
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: urlRequest, delegate: ProviderRedirectBlocker())
-        } catch {
-            throw NotesProviderError.requestFailed(error.localizedDescription)
-        }
-        try validate(response: response, data: data)
+        let data = try await responseData(for: urlRequest)
         let decoded: ChatCompletionResponse
         do {
             decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
@@ -71,14 +65,7 @@ public struct OpenAICompatibleProvider: NotesProvider {
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request, delegate: ProviderRedirectBlocker())
-        } catch {
-            throw NotesProviderError.requestFailed(error.localizedDescription)
-        }
-        try validate(response: response, data: data)
+        _ = try await responseData(for: request)
         return "Connection succeeded"
     }
 
@@ -88,11 +75,33 @@ public struct OpenAICompatibleProvider: NotesProvider {
             .appendingPathComponent(path)
     }
 
-    private func validate(response: URLResponse, data: Data) throws {
-        guard let http = response as? HTTPURLResponse else { throw NotesProviderError.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            let message = String(data: data.prefix(1_024), encoding: .utf8) ?? "Unknown provider error"
-            throw NotesProviderError.server(statusCode: http.statusCode, message: message)
+    private func responseData(for request: URLRequest) async throws -> Data {
+        do {
+            let (bytes, response) = try await session.bytes(for: request, delegate: ProviderRedirectBlocker())
+            defer { bytes.task.cancel() }
+            guard let http = response as? HTTPURLResponse else { throw NotesProviderError.invalidResponse }
+            guard (200..<300).contains(http.statusCode) else {
+                var preview = Data()
+                for try await byte in bytes {
+                    preview.append(byte)
+                    if preview.count == 1_024 { break }
+                }
+                throw NotesProviderError.server(statusCode: http.statusCode, message: String(decoding: preview, as: UTF8.self))
+            }
+
+            guard response.expectedContentLength <= Self.maximumResponseBytes else {
+                throw NotesProviderError.responseTooLarge
+            }
+            var data = Data()
+            for try await byte in bytes {
+                guard data.count < Self.maximumResponseBytes else { throw NotesProviderError.responseTooLarge }
+                data.append(byte)
+            }
+            return data
+        } catch let error as NotesProviderError {
+            throw error
+        } catch {
+            throw NotesProviderError.requestFailed(error.localizedDescription)
         }
     }
 }

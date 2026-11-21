@@ -37,15 +37,18 @@ public enum ProsodyFormatters {
 
 public enum FileNameSanitizer {
     public static func sanitize(_ value: String, fallback: String = "Recording") -> String {
+        sanitizeComponent(value) ?? sanitizeComponent(fallback) ?? "Recording"
+    }
+
+    private static func sanitizeComponent(_ value: String) -> String? {
         let invalid = CharacterSet(charactersIn: ":/\\\n\r\t")
-        let pieces = value.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: invalid)
-        var result = pieces.joined(separator: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        result = result.replacingOccurrences(of: "  ", with: " ")
-        if result.isEmpty { result = fallback }
-        if result.count > 120 {
-            result = String(result.prefix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
+        let cleaned = String(String.UnicodeScalarView(value.unicodeScalars.filter {
+            $0.properties.generalCategory != .control || invalid.contains($0)
+        })).trimmingCharacters(in: .whitespacesAndNewlines)
+        let component = cleaned.components(separatedBy: invalid).joined(separator: "-")
+            .replacingOccurrences(of: "  ", with: " ")
+        let result = String(component.prefix(120)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard result.contains(where: { $0 != "." }) else { return nil }
         return result
     }
 }

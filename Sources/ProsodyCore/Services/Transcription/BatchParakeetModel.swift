@@ -47,7 +47,7 @@ struct BatchParakeetModel: DictationRecognitionModel {
 
 /// Keep short dictations in memory. Longer inputs spill to a private temporary
 /// CAF and use FluidAudio's overlapping, disk-backed window processor.
-actor BatchParakeetSession: STTSession, DictationRecognitionSession {
+actor BatchParakeetSession: ParakeetEngineSession, DictationRecognitionSession {
     nonisolated let updates: AsyncStream<STTUpdate>
     private let continuation: AsyncStream<STTUpdate>.Continuation
     private let source: AudioSource
@@ -57,10 +57,15 @@ actor BatchParakeetSession: STTSession, DictationRecognitionSession {
     private let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
     private var file: AVAudioFile?
     private var initialSamples: [Float] = []
-    private var origin: TimeInterval?
+    private var timeline = ParakeetAudioTimeline()
     private var sampleCount = 0
     private var sawSignal = false
     private var finished = false
+    private var recognizing = false
+    private var cancelled = false
+    private var recognitionWaiters: [CheckedContinuation<Void, Never>] = []
+
+    var hasEnded: Bool { finished && !recognizing }
 
     init(source: AudioSource, manager: AsrManager, configuration: TranscriptSegmentationConfiguration) {
         self.source = source
@@ -75,7 +80,9 @@ actor BatchParakeetSession: STTSession, DictationRecognitionSession {
         guard !finished else { throw STTError.sessionFinished }
         guard !samples.isEmpty else { return }
         try Task.checkCancellation()
-        if origin == nil { origin = startTime }
+        guard startTime.isFinite, startTime >= 0, samples.allSatisfy(\.isFinite) else {
+            throw STTError.invalidAudio
+        }
         if !sawSignal { sawSignal = samples.contains { $0 != 0 } }
         if sampleCount + samples.count <= ASRConstants.maxModelSamples {
             initialSamples.append(contentsOf: samples)
@@ -87,6 +94,7 @@ actor BatchParakeetSession: STTSession, DictationRecognitionSession {
             }
             try write(samples)
         }
+        timeline.append(sampleCount: samples.count, startTime: startTime)
         sampleCount += samples.count
     }
 
@@ -99,21 +107,38 @@ actor BatchParakeetSession: STTSession, DictationRecognitionSession {
         return try await recognize(endLimit: endTime)
     }
 
-    func cancel() {
+    func cancel() async {
         finished = true
+        cancelled = true
+        continuation.finish()
+        if recognizing {
+            await withCheckedContinuation { recognitionWaiters.append($0) }
+        } else {
+            discardAudio()
+        }
+    }
+
+    private func discardAudio() {
         file = nil
         initialSamples.removeAll()
-        continuation.finish()
         try? FileManager.default.removeItem(at: url)
     }
 
     private func recognize(endLimit: TimeInterval) async throws -> FinalTranscript {
         guard !finished else { throw STTError.sessionFinished }
         finished = true
-        defer { cancel() }
-        guard let origin, sawSignal else { return FinalTranscript(segments: []) }
-
-        let actualEnd = origin + Double(sampleCount) / format.sampleRate
+        recognizing = true
+        defer {
+            discardAudio()
+            recognizing = false
+            continuation.finish()
+            let waiters = recognitionWaiters
+            recognitionWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
+        guard let origin = timeline.startTime, let actualEnd = timeline.endTime, sawSignal else {
+            return FinalTranscript(segments: [])
+        }
         let minimum = ASRConstants.minimumRequiredSamples(forSampleRate: Int(format.sampleRate))
         var state = TdtDecoderState.make()
         let result: ASRResult
@@ -126,10 +151,15 @@ actor BatchParakeetSession: STTSession, DictationRecognitionSession {
             result = try await manager.transcribe(initialSamples, decoderState: &state)
         }
         try Task.checkCancellation()
+        if cancelled { throw CancellationError() }
         let end = min(endLimit, actualEnd)
         var assembler = StreamingTranscriptAssembler(source: source, configuration: configuration)
-        for token in result.tokenTimings ?? [] where token.startTime + origin < end {
-            _ = assembler.append(token: token.token, start: token.startTime + origin, end: min(token.endTime + origin, end))
+        for token in result.tokenTimings ?? [] {
+            guard token.startTime.isFinite, token.endTime.isFinite,
+                  token.startTime >= 0, token.endTime >= token.startTime,
+                  let time = timeline.map(start: token.startTime, end: token.endTime),
+                  time.start < end else { continue }
+            _ = assembler.append(token: token.token, start: time.start, end: min(time.end, end))
         }
         assembler.flush()
         if assembler.finalized.isEmpty, !result.text.isEmpty {

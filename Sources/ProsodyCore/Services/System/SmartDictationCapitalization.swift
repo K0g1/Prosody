@@ -340,10 +340,10 @@ enum SmartDictationCapitalization {
     }
 
     private static func firstCasedScalar(in text: String) -> FirstCasedScalar? {
-        guard let index = text.unicodeScalars.firstIndex(where: { $0.properties.isCased }) else {
-            return nil
-        }
-        return FirstCasedScalar(index: index, scalar: text.unicodeScalars[index])
+        let scalars = text.unicodeScalars
+        guard let index = scalars.firstIndex(where: { $0.properties.isAlphabetic || $0.properties.numericType != nil }),
+              scalars[index].properties.isCased else { return nil }
+        return FirstCasedScalar(index: index, scalar: scalars[index])
     }
 
     private static func replacing(

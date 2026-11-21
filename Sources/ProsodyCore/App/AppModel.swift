@@ -74,6 +74,9 @@ public final class AppModel: ObservableObject {
     private var audioArchiveWarning: String?
 
     var transitionTask: Task<Void, Never>?
+    private var speakerEditTask: Task<Void, Never>?
+    private var pendingSpeakerEdit: Transcript?
+    @Published private(set) var isPreparingToTerminate = false
     private var meterTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
     private var transcriptFeedTask: Task<Void, Never>?
@@ -91,7 +94,8 @@ public final class AppModel: ObservableObject {
     private var productionClock = SessionClock()
     private var lastCapturePTS: TimeInterval?
 
-    private var recordingStartedAt: Date?
+    private let recordingClock = SuspendingClock()
+    private var recordingStartedAt: SuspendingClock.Instant?
     var accumulatedDuration: TimeInterval = 0
     var activeRecoveryID: UUID?
     private var recoverySegmentIDs: Set<UUID> = []
@@ -152,7 +156,7 @@ public final class AppModel: ObservableObject {
     }
 
     public var canToggleRecording: Bool {
-        guard !isTransitioning, !isImportingAudio, !dictation.isActive else { return false }
+        guard !isPreparingToTerminate, !isTransitioning, !isImportingAudio, !dictation.isActive else { return false }
         switch recordingState {
         case .idle, .recording, .paused, .completed, .failed:
             return true
@@ -162,7 +166,7 @@ public final class AppModel: ObservableObject {
     }
 
     public var canFinishRecording: Bool {
-        guard !isTransitioning, !isImportingAudio, !dictation.isActive else { return false }
+        guard !isPreparingToTerminate, !isTransitioning, !isImportingAudio, !dictation.isActive else { return false }
         switch recordingState {
         case .recording, .paused: return true
         default: return false
@@ -170,7 +174,8 @@ public final class AppModel: ObservableObject {
     }
 
     public var canBrowseSessions: Bool {
-        !recordingState.isRecording && !recordingState.isBusy && !isTransitioning && !isImportingAudio && !dictation.isActive
+        !isPreparingToTerminate && !recordingState.isRecording && !recordingState.isBusy
+            && !isTransitioning && !isImportingAudio && !dictation.isActive
     }
 
     public var selectedSessionTitle: String {
@@ -201,13 +206,14 @@ public final class AppModel: ObservableObject {
     }
 
     public var currentDuration: TimeInterval {
-        elapsedDuration(at: .now)
+        guard let recordingStartedAt else { return max(0, accumulatedDuration) }
+        let elapsed = recordingStartedAt.duration(to: recordingClock.now).components
+        return max(0, accumulatedDuration + Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18)
     }
 
-    public func elapsedDuration(at date: Date) -> TimeInterval {
-        guard let recordingStartedAt else { return max(0, accumulatedDuration) }
-        return max(0, accumulatedDuration + date.timeIntervalSince(recordingStartedAt))
-    }
+    // TimelineView controls when the current duration is displayed. Keep the
+    // existing entry point for callers that supply a wall-clock tick.
+    public func elapsedDuration(at _: Date) -> TimeInterval { currentDuration }
 
     public func toggleRecording() {
         switch recordingState {
@@ -303,6 +309,7 @@ public final class AppModel: ObservableObject {
         completionDismissal?.cancel()
         recordingStartedAt = nil
         accumulatedDuration = 0
+        activeRecoveryID = nil
         lastCapturePTS = nil
         productionClock.reset()
         activeSession = nil
@@ -350,9 +357,9 @@ public final class AppModel: ObservableObject {
     }
 
     public func pauseRecording() {
-        guard recordingState == .recording, !isTransitioning else { return }
+        guard canToggleRecording, recordingState == .recording, let sessionID = activeSession?.id else { return }
         isTransitioning = true
-        let duration = elapsedDuration(at: .now)
+        let duration = currentDuration
         accumulatedDuration = duration
         recordingStartedAt = nil
         systemMeter = .zero
@@ -360,31 +367,32 @@ public final class AppModel: ObservableObject {
 
         if demoMode, let pipeline = demoPipeline {
             transitionTask = Task { @MainActor [weak self, pipeline] in
-                defer { self?.isTransitioning = false }
+                defer { if self?.activeSession?.id == sessionID { self?.isTransitioning = false } }
                 do {
                     try await pipeline.pause(atPTS: max(0, duration))
                     guard let self else { return }
                     self.activeSession?.duration = duration
                     self.activeSession?.status = "paused"
                     self.recordingState = .paused
-                    self.updateRecovery(state: .paused, duration: duration)
+                    await self.updateRecovery(state: .paused, duration: duration)
                 } catch {
                     self?.fail(title: "Could not pause recording", error: error)
                 }
             }
         } else if let capture = productionCapture {
             transitionTask = Task { @MainActor [weak self, capture] in
-                defer { self?.isTransitioning = false }
+                defer { if self?.activeSession?.id == sessionID { self?.isTransitioning = false } }
                 do {
                     try await capture.pause()
-                    guard let self, self.recordingState == .recording else { return }
+                    guard let self, self.activeSession?.id == sessionID,
+                          self.recordingState == .recording else { return }
                     if let lastCapturePTS = self.lastCapturePTS, self.productionClock.isRunning {
                         _ = try? self.productionClock.pause(atPTS: lastCapturePTS)
                     }
                     self.activeSession?.duration = duration
                     self.activeSession?.status = "paused"
                     self.recordingState = .paused
-                    self.updateRecovery(state: .paused, duration: duration)
+                    await self.updateRecovery(state: .paused, duration: duration)
                 } catch {
                     await self?.failProductionCapture(capture, title: "Could not pause recording", error: error)
                 }
@@ -398,46 +406,47 @@ public final class AppModel: ObservableObject {
     }
 
     public func resumeRecording() {
-        guard recordingState == .paused, !isTransitioning else { return }
+        guard canToggleRecording, recordingState == .paused, let sessionID = activeSession?.id else { return }
         isTransitioning = true
 
         if demoMode, let pipeline = demoPipeline {
             transitionTask = Task { @MainActor [weak self, pipeline] in
-                defer { self?.isTransitioning = false }
+                defer { if self?.activeSession?.id == sessionID { self?.isTransitioning = false } }
                 do {
                     try await pipeline.resume(firstPTS: max(0, (self?.lastCapturePTS ?? 0) + 0.01))
                     guard let self else { return }
-                    self.recordingStartedAt = .now
+                    self.recordingStartedAt = self.recordingClock.now
                     self.activeSession?.status = "recording"
                     self.recordingState = .recording
                     self.startMeterTicker()
-                    self.updateRecovery(state: .recording, duration: self.accumulatedDuration)
+                    await self.updateRecovery(state: .recording, duration: self.accumulatedDuration)
                 } catch {
                     self?.fail(title: "Could not resume recording", error: error)
                 }
             }
         } else if let capture = productionCapture {
             transitionTask = Task { @MainActor [weak self, capture] in
-                defer { self?.isTransitioning = false }
+                defer { if self?.activeSession?.id == sessionID { self?.isTransitioning = false } }
                 do {
                     try await capture.resume()
-                    guard let self, self.recordingState == .paused else { return }
+                    guard let self, self.activeSession?.id == sessionID,
+                          self.recordingState == .paused else { return }
                     // Start the next clock epoch from the first packet after
                     // resume. ScreenCaptureKit may advance its PTS while the
                     // stream is paused, and using the old PTS would count that
                     // wall-clock gap as recording time.
-                    self.recordingStartedAt = .now
+                    self.recordingStartedAt = self.recordingClock.now
                     self.activeSession?.status = "recording"
                     self.recordingState = .recording
                     self.startMeterTicker()
-                    self.updateRecovery(state: .recording, duration: self.accumulatedDuration)
+                    await self.updateRecovery(state: .recording, duration: self.accumulatedDuration)
                 } catch {
                     await self?.failProductionCapture(capture, title: "Could not resume recording", error: error)
                 }
             }
         } else {
             isTransitioning = false
-            recordingStartedAt = .now
+            recordingStartedAt = recordingClock.now
             activeSession?.status = "recording"
             recordingState = .recording
             startMeterTicker()
@@ -445,11 +454,16 @@ public final class AppModel: ObservableObject {
     }
 
     public func finishRecording() {
-        guard canFinishRecording, let session = activeSession else { return }
+        guard canFinishRecording else { return }
+        finishActiveRecording()
+    }
+
+    private func finishActiveRecording(generateAutomaticNotes: Bool = true) {
+        guard recordingState.isRecording, let session = activeSession else { return }
         cancelTask(&transcriptFeedTask)
         cancelTask(&meterTask)
 
-        let duration = elapsedDuration(at: .now)
+        let duration = currentDuration
         accumulatedDuration = duration
         recordingStartedAt = nil
         activeSession?.duration = duration
@@ -458,10 +472,10 @@ public final class AppModel: ObservableObject {
         microphoneMeter = .zero
         recordingState = .stopping
         processingStatus = .saved
-        updateRecovery(state: .stopping, duration: duration)
 
         if demoMode, let pipeline = demoPipeline {
             transitionTask = Task { @MainActor [weak self, pipeline, session] in
+                await self?.updateRecovery(state: .stopping, duration: duration)
                 do {
                     if session.liveTranscriptionEnabled == false {
                         // Demo mode follows the production contract too: no
@@ -473,14 +487,40 @@ public final class AppModel: ObservableObject {
                         }
                     }
                     let result = try await pipeline.finish(atPTS: max(10, duration))
-                    await self?.complete(result: result, fallbackSession: session)
+                    await self?.complete(result: result, fallbackSession: session,
+                                         generateAutomaticNotes: generateAutomaticNotes)
                 } catch {
                     self?.fail(title: "Could not finish recording", error: error)
                 }
             }
         } else {
             transitionTask = Task { @MainActor [weak self] in
-                await self?.finishProductionRecording()
+                await self?.updateRecovery(state: .stopping, duration: duration)
+                await self?.finishProductionRecording(generateAutomaticNotes: generateAutomaticNotes)
+            }
+        }
+    }
+
+    var needsTimeToTerminate: Bool {
+        recordingState.isRecording || recordingState.isBusy || isTransitioning
+            || isImportingAudio || dictation.hasPendingShutdownWork
+    }
+
+    func prepareForTermination() async {
+        isPreparingToTerminate = true
+        globalHotkeyManager?.stop()
+        await dictation.prepareForTermination()
+        while needsTimeToTerminate {
+            if recordingState.isRecording, !isTransitioning {
+                finishActiveRecording(generateAutomaticNotes: false)
+                continue
+            }
+            await transitionTask?.value
+            await speakerEditTask?.value
+            if needsTimeToTerminate {
+                // Compression and externally launched transcriptions finish
+                // in their own tasks, outside transitionTask.
+                try? await Task.sleep(for: .milliseconds(50))
             }
         }
     }
@@ -539,7 +579,8 @@ public final class AppModel: ObservableObject {
     }
 
     private func applySpeakerEdit(_ edited: Transcript) {
-        guard canBrowseSessions, let session = activeSession, session.status == "completed",
+        guard !isPreparingToTerminate, canBrowseSessions || speakerEditTask != nil else { return }
+        guard let session = activeSession, session.status == "completed",
               selectedSessionID == session.id else {
             // The demo transcript has no saved session.
             if demoMode, !recordingState.isBusy {
@@ -560,10 +601,16 @@ public final class AppModel: ObservableObject {
         transcript = edited
         liveSegments = edited.visibleSegments
         lastNotice = "Speaker names updated"
+        pendingSpeakerEdit = edited
+        guard speakerEditTask == nil else { return }
         isTransitioning = true
-        Task { @MainActor [weak self] in
+        speakerEditTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.persistCurrentSession(session: session, editedTranscript: edited)
+            while let edit = self.pendingSpeakerEdit {
+                self.pendingSpeakerEdit = nil
+                await self.persistCurrentSession(session: session, editedTranscript: edit)
+            }
+            self.speakerEditTask = nil
             self.isTransitioning = false
         }
     }
@@ -600,6 +647,7 @@ public final class AppModel: ObservableObject {
     }
 
     public func retryLastFailure() {
+        guard case .failed = recordingState, canBrowseSessions else { return }
         cancelRecordingTasks()
         userFacingError = nil
         lastNotice = nil
@@ -609,21 +657,32 @@ public final class AppModel: ObservableObject {
         recordingState = .idle
     }
 
+    var canManageRecovery: Bool {
+        canManageModelSelection && !isCompressingAudio
+    }
+
     public func recover(_ manifest: RecoveryManifest) {
-        guard !recordingState.isBusy, !recordingState.isRecording else { return }
+        guard canManageRecovery else { return }
         cancelRecordingTasks()
+        selectionTask?.cancel()
+        transcriptUndoManager.removeAllActions()
+        isTransitioning = true
         userFacingError = nil
         lastNotice = nil
         recordingState = .finalizingTranscript
         processingStatus = .saved
         transitionTask = Task { @MainActor [weak self] in
+            defer { self?.isTransitioning = false }
             await self?.finishRecovery(manifest)
         }
     }
 
     public func discardRecovery(_ manifest: RecoveryManifest) {
-        Task { @MainActor [weak self] in
+        guard canManageRecovery else { return }
+        isTransitioning = true
+        transitionTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.isTransitioning = false }
             do {
                 try await self.recoveryStore.remove(id: manifest.id)
                 await self.refreshRecoveryInventory()
@@ -823,8 +882,13 @@ public final class AppModel: ObservableObject {
     }
 
     private func startProductionRecording(session: RecordingSession) async {
+        var pendingCapture: ScreenCaptureCoordinator?
+        var pendingEngine: ParakeetEngine?
+        var sttSessions: [AudioSource: any STTSession] = [:]
+        var recoveryBegan = false
         do {
             await dictation.releaseCachedModel()
+            try Task.checkCancellation()
             #if DEBUG
             if usesHardwareRecordingFixture {
                 let microphoneReady = !session.captureMode.sources.contains(.microphone) || MicrophonePermission.isGranted
@@ -851,16 +915,16 @@ public final class AppModel: ObservableObject {
             if session.captureMode.sources.contains(.system), !ScreenCaptureCoordinator.requestSystemAudioPermission() {
                 throw ScreenCaptureCoordinatorError.screenPermissionDenied
             }
-            var sttSessions: [AudioSource: any STTSession] = [:]
             guard session.sttEngineID == .parakeet, let speechModel = SpeechModel(rawValue: session.sttModelID) else {
                 throw STTError.unsupportedModel(session.sttModelID)
             }
             // Validate before capture even when transcription is deferred.
             _ = try await modelManager.installedURL(for: speechModel)
+            try Task.checkCancellation()
             if session.liveTranscriptionEnabled != false {
                 recordingState = .preparing(.loadingModel(progress: 0))
                 let engine = ParakeetEngine(segmentationConfiguration: recordingSegmentationConfiguration, inventory: modelManager)
-                productionEngine = engine
+                pendingEngine = engine
                 try await engine.prepare(model: speechModel.descriptor) { _ in }
                 try Task.checkCancellation()
                 for source in session.captureMode.sources {
@@ -870,8 +934,7 @@ public final class AppModel: ObservableObject {
             try Task.checkCancellation()
             recordingState = .preparing(.startingCapture)
             let capture = ScreenCaptureCoordinator()
-            productionCapture = capture
-            productionSTTSessions = sttSessions
+            pendingCapture = capture
             try await capture.start(
                 mode: session.captureMode,
                 microphoneDeviceID: selectedMicrophoneDeviceID()
@@ -879,6 +942,7 @@ public final class AppModel: ObservableObject {
             try Task.checkCancellation()
             do {
                 _ = try await recoveryStore.begin(session: session)
+                recoveryBegan = true
             } catch {
                 audioArchiveWarning = "Recovery setup failed: \(error.localizedDescription)"
                 throw error
@@ -887,36 +951,48 @@ public final class AppModel: ObservableObject {
             // temporary archive is deleted only after the final transcript is
             // safely committed, preserving crash recovery semantics.
             let recoveryDirectory = await recoveryStore.directoryURL(for: session.id)
+            try Task.checkCancellation()
+            guard activeSession?.id == session.id else { throw CancellationError() }
             audioArchiveWriter = AudioArchiveWriter(
                 directoryURL: recoveryDirectory.appendingPathComponent("audio", isDirectory: true),
                 bitRate: preferences.recordingQuality == "high" ? 192_000 : 96_000
             )
 
             productionCapture = capture
+            productionEngine = pendingEngine
             productionSTTSessions = sttSessions
             productionCoordinator = TranscriptCoordinator(speakerMode: session.speakerMode)
             productionClock.reset()
             activeRecoveryID = session.id
             recoverySegmentIDs.removeAll()
-            recordingStartedAt = .now
+            recordingStartedAt = recordingClock.now
             activeSession?.status = "recording"
             recordingState = .recording
             startMeterTicker()
             startProductionTasks(capture: capture, sessions: sttSessions)
-        } catch let error as UserFacingError {
-            await cleanupProduction()
-            fail(error: error)
-        } catch let error as ScreenCaptureCoordinatorError where error == .screenPermissionDenied {
-            await cleanupProduction()
-            fail(error: UserFacingError(
-                title: "Screen Recording permission required",
-                message: error.localizedDescription,
-                recoveryAction: "Open Screen Recording Settings",
-                recoveryURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
-            ))
         } catch {
-            await cleanupProduction()
-            fail(title: "Prosody could not start", error: error)
+            await pendingCapture?.stop(drainOutputQueues: false)
+            for sttSession in sttSessions.values { await sttSession.cancel() }
+            await pendingEngine?.unload()
+            if recoveryBegan { try? await recoveryStore.remove(id: session.id) }
+            guard activeSession?.id == session.id else { return }
+            switch error {
+            case is CancellationError:
+                activeSession = nil
+                selectedSessionID = nil
+                recordingState = .idle
+            case let error as UserFacingError:
+                fail(error: error)
+            case ScreenCaptureCoordinatorError.screenPermissionDenied:
+                fail(error: UserFacingError(
+                    title: "Screen Recording permission required",
+                    message: error.localizedDescription,
+                    recoveryAction: "Open Screen Recording Settings",
+                    recoveryURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+                ))
+            default:
+                fail(title: "Prosody could not start", error: error)
+            }
         }
     }
 
@@ -940,10 +1016,12 @@ public final class AppModel: ObservableObject {
                     do {
                         try await archiveWriter.append(packet)
                     } catch {
+                        guard !Task.isCancelled else { return }
                         self.audioArchiveWarning = "Audio archive could not be written; it remains in Recovery."
                         throw error
                     }
                 }
+                guard !Task.isCancelled else { return }
                 if packet.presentationTime - self.lastMeterPTS[packet.source, default: 0] >= 0.1 {
                     self.lastMeterPTS[packet.source] = packet.presentationTime
                     let level = AudioMeterCalculator.level(for: packet.samples)
@@ -956,7 +1034,7 @@ public final class AppModel: ObservableObject {
                     packet.samples,
                     from: packet.sampleRate
                 )
-                if !speechSamples.isEmpty {
+                if !Task.isCancelled, !speechSamples.isEmpty {
                     try await sttSession.append(samples: speechSamples, startTime: startTime)
                 }
             }
@@ -980,6 +1058,7 @@ public final class AppModel: ObservableObject {
                     guard let self, !Task.isCancelled else { return }
                     guard let coordinator = self.productionCoordinator else { continue }
                     let snapshot = await coordinator.ingest(update)
+                    guard !Task.isCancelled else { return }
                     self.transcript = Transcript(segments: snapshot.segments)
                     self.liveSegments = self.preferences.liveTranscription ? snapshot.visibleSegments : []
                     if case .final(_, let segment) = update {
@@ -989,21 +1068,30 @@ public final class AppModel: ObservableObject {
                               let id = self.activeRecoveryID {
                         self.recoveryCheckpointTimes[source] = segment.end
                         do { try await self.recoveryStore.checkpoint(segment: segment, to: id) }
-                        catch { self.audioArchiveWarning = "Recovery checkpoint failed: \(error.localizedDescription)" }
+                        catch {
+                            if !Task.isCancelled, self.activeRecoveryID == id {
+                                self.audioArchiveWarning = "Recovery checkpoint failed: \(error.localizedDescription)"
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    private func finishProductionRecording() async {
+    private func finishProductionRecording(generateAutomaticNotes: Bool) async {
+        guard !handlingCaptureFailure else { return }
+        if case .failed = recordingState { return }
+        let sessionID = activeSession?.id
         isTransitioning = true
-        defer { isTransitioning = false }
+        defer { if activeSession?.id == sessionID { isTransitioning = false } }
         let capture = productionCapture
+        let consumer = captureTask
         await capture?.stop()
-        if let captureTask {
-            await captureTask.value
-        }
+        // The consumer clears captureTask when it starts handling a failure.
+        // Still join it before finalization uses the archive and recognizer.
+        await consumer?.value
+        guard activeSession?.id == sessionID else { return }
         captureTask = nil
         if case .failed = recordingState { return }
 
@@ -1056,9 +1144,12 @@ public final class AppModel: ObservableObject {
             )
             await complete(
                 result: RecordingResult(session: session, transcript: finalTranscript),
-                fallbackSession: session
+                fallbackSession: session,
+                generateAutomaticNotes: generateAutomaticNotes
             )
         } catch {
+            _ = try? await audioArchiveWriter?.finish()
+            audioArchiveWriter = nil
             let partial = Transcript(segments: transcript.segments)
             if let session = activeSession {
                 _ = try? await persist(document: SessionDocument(session: session, transcript: partial))
@@ -1147,7 +1238,7 @@ public final class AppModel: ObservableObject {
                     self.activeRecoveryID = nil
                     self.audioArchiveWarning = "Recovery setup failed: \(error.localizedDescription)"
                 }
-                self.recordingStartedAt = .now
+                self.recordingStartedAt = self.recordingClock.now
                 self.recordingState = .recording
                 self.startMeterTicker()
                 if started.liveTranscriptionEnabled != false {
@@ -1205,7 +1296,7 @@ public final class AppModel: ObservableObject {
     }
 
     func complete(result: RecordingResult, fallbackSession: RecordingSession, announceCompletion: Bool = true,
-                  importedAudio: URL? = nil) async {
+                  importedAudio: URL? = nil, generateAutomaticNotes: Bool = true) async {
         recordingState = .finalizingTranscript
 
         if importedAudio != nil { recordingWarning = nil }
@@ -1216,7 +1307,7 @@ public final class AppModel: ObservableObject {
         session.labels = fallbackSession.labels
         session.destinationRootPath = fallbackSession.destinationRootPath
         session.transcriptFileName = fallbackSession.transcriptFileName
-        session.duration = max(elapsedDuration(at: .now), result.session.duration)
+        session.duration = max(currentDuration, result.session.duration)
         let replacements = WordReplacementProcessor(rules: preferences.wordReplacements)
         let recognized = result.transcript
         let cleaned = preferences.omitFillerWords ? FillerWordFilter().apply(to: recognized) : recognized
@@ -1319,7 +1410,7 @@ public final class AppModel: ObservableObject {
 
             var notes: String?
             var notesWarning: String?
-            if preferences.generateNotesAutomatically && session.sourceKind != "dictation" {
+            if generateAutomaticNotes && preferences.generateNotesAutomatically && session.sourceKind != "dictation" {
                 recordingState = .generatingNotes(progress: 0.25)
                 processingStatus = .generatingNotes(0.25)
                 do {
@@ -1370,12 +1461,15 @@ public final class AppModel: ObservableObject {
             processingStatus = warning.map(ProcessingStatus.warning) ?? .completed
             lastNotice = warning
             recordingState = .completed(session.id)
-            if announceCompletion {
+            if announceCompletion && !isPreparingToTerminate {
                 announceSavedSession(session.id, message: notes == nil ? "Transcript saved" : "Transcript and notes saved")
                 if session.sourceKind != "dictation" { sendFinishedNotification(title: session.title) }
                 if preferences.automaticallyRevealNotes && notes != nil { openNotes() }
             }
         } catch {
+            _ = try? await audioArchiveWriter?.finish()
+            audioArchiveWriter = nil
+            if activeRecoveryID == session.id { await refreshRecoveryInventory() }
             fail(title: "Could not save session", error: error)
         }
     }
@@ -1392,14 +1486,15 @@ public final class AppModel: ObservableObject {
             return try await TemplateNotesProvider().generate(request: request, modelID: session.notesModelID).markdown
         }
 
-        let key = try? keychainStore.read(account: preferences.notesProviderID)
-        let provider = OpenAICompatibleProvider(
-            id: preferences.notesProviderID,
-            baseURL: URL(string: preferences.notesBaseURL) ?? URL(string: "http://127.0.0.1:1234/v1")!,
-            apiKey: key,
-            localOnly: preferences.localOnlyMode
-        )
         do {
+            let localOnly = preferences.localOnlyMode
+            let baseURL = try SafeURLValidator.validate(preferences.notesBaseURL, policy: .init(localOnly: localOnly))
+            let provider = OpenAICompatibleProvider(
+                id: preferences.notesProviderID,
+                baseURL: baseURL,
+                apiKey: try? keychainStore.read(account: preferences.notesProviderID),
+                localOnly: localOnly
+            )
             return try await provider.generate(request: request, modelID: session.notesModelID).markdown
         } catch {
             notesFallbackWarning = "The notes provider was unavailable. Saved an offline outline; it is not an AI summary."
@@ -1542,9 +1637,18 @@ public final class AppModel: ObservableObject {
             let recoveryAudioDirectory = await recoveryStore.directoryURL(for: manifest.id)
                 .appendingPathComponent("audio", isDirectory: true)
             let hasRecoveryAudio = !(try AudioArchiveMerger.recoveryAudioFiles(in: recoveryAudioDirectory)).isEmpty
-            if !hasRecoveryAudio,
-               let existing = await loadDocument(id: manifest.id),
+            if let existing = await loadDocument(id: manifest.id),
                existing.session.status == "completed" {
+                // A prior attempt already committed this transcript. Recovery
+                // may now contain only the audio chunks that failed to move.
+                if hasRecoveryAudio {
+                    guard let path = existing.session.outputFolderPath else { throw SessionStoreError.sessionNotFound }
+                    _ = try await moveRecoveredAudio(sessionID: manifest.id, keepAudio: existing.session.keepAudio,
+                                                     to: URL(fileURLWithPath: path, isDirectory: true))
+                    if let summary = await refreshLibrarySummary(id: manifest.id, folderPath: path) {
+                        upsertRecentSummary(summary)
+                    }
+                }
                 try await recoveryStore.markCompleted(id: manifest.id)
                 if activeRecoveryID == manifest.id { activeRecoveryID = nil }
                 await refreshRecoveryInventory()
@@ -1771,19 +1875,21 @@ public final class AppModel: ObservableObject {
         guard segment.isFinal, let activeRecoveryID, !recoverySegmentIDs.contains(segment.id) else { return }
         do {
             _ = try await recoveryStore.append(segment: segment, to: activeRecoveryID)
-            recoverySegmentIDs.insert(segment.id)
+            if self.activeRecoveryID == activeRecoveryID { recoverySegmentIDs.insert(segment.id) }
         } catch {
-            audioArchiveWarning = "Recovery journal failed: \(error.localizedDescription)"
+            if self.activeRecoveryID == activeRecoveryID {
+                audioArchiveWarning = "Recovery journal failed: \(error.localizedDescription)"
+            }
         }
     }
 
-    private func updateRecovery(state: RecoveryState, duration: TimeInterval) {
-        guard let id = activeRecoveryID, activeSession != nil else { return }
-        Task { @MainActor [weak self, recoveryStore] in
-            do {
-                try await recoveryStore.updateState(id: id, state: state, duration: duration)
-            } catch {
-                self?.audioArchiveWarning = "Recovery state could not be updated: \(error.localizedDescription)"
+    private func updateRecovery(state: RecoveryState, duration: TimeInterval) async {
+        guard let id = activeRecoveryID, activeSession?.id == id else { return }
+        do {
+            try await recoveryStore.updateState(id: id, state: state, duration: duration)
+        } catch {
+            if activeRecoveryID == id {
+                audioArchiveWarning = "Recovery state could not be updated: \(error.localizedDescription)"
             }
         }
     }
@@ -1838,20 +1944,39 @@ public final class AppModel: ObservableObject {
     ) async {
         guard productionCapture === capture, !handlingCaptureFailure else { return }
         handlingCaptureFailure = true
-        defer { handlingCaptureFailure = false }
+        defer {
+            handlingCaptureFailure = false
+            isTransitioning = false
+        }
         isTransitioning = true
         recordingState = .stopping
-        if !fromConsumer {
+        if error as? ScreenCaptureCoordinatorError == .pauseDrainTimedOut {
             captureTask?.cancel()
-            await captureTask?.value
+            await capture.stop(drainOutputQueues: false)
+            // The inference that blocked the drain may still be running. Its
+            // cleanup owns only the old engine, after publication is stopped.
+            let engine = productionEngine
+            productionCapture = nil
+            productionEngine = nil
+            productionSTTSessions.removeAll()
+            productionCoordinator = nil
+            sttUpdateTasks.values.forEach { $0.cancel() }
+            sttUpdateTasks.removeAll()
+            Task { await engine?.unload() }
+            await updateRecovery(state: .recoverable, duration: accumulatedDuration)
+        } else {
+            if !fromConsumer {
+                captureTask?.cancel()
+                await captureTask?.value
+            }
+            await cleanupProduction()
         }
         captureTask = nil
-        await cleanupProduction()
         _ = try? await audioArchiveWriter?.finish()
         audioArchiveWriter = nil
         await refreshRecoveryInventory()
-        // A failed state allows another recording. Publish it only after
-        // the old stream and its model are no longer in use.
+        // Allow another recording once the old stream has stopped and its
+        // archive is closed. Any remaining inference belongs to the old engine.
         fail(title: title, error: error)
     }
 
@@ -1882,7 +2007,6 @@ public final class AppModel: ObservableObject {
         systemMeter = .zero
         microphoneMeter = .zero
         recordingStartedAt = nil
-        isTransitioning = false
         cancelTask(&meterTask)
         cancelTask(&transcriptFeedTask)
     }

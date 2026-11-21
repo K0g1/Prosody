@@ -3,6 +3,7 @@ import FluidAudio
 #endif
 @preconcurrency import AVFoundation
 import Foundation
+import os
 
 /// The app-facing result of the offline speaker pass. FluidAudio types stay
 /// behind this adapter so the transcript and UI do not depend on its model
@@ -64,7 +65,7 @@ public actor FluidAudioDiarizer {
         do {
             try FileManager.default.createDirectory(at: temporaryURL, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: temporaryURL) }
-            let mergedURL = try makeDiarizationInput(
+            let mergedURL = try Self.makeDiarizationInput(
                 from: audioFileURLs,
                 in: temporaryURL
             )
@@ -95,6 +96,8 @@ public actor FluidAudioDiarizer {
             }
             progress?(1)
             return DiarizationIntervalResult(intervals: intervals)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as FluidAudioDiarizerError {
             throw error
         } catch {
@@ -106,95 +109,82 @@ public actor FluidAudioDiarizer {
     }
 
 #if canImport(FluidAudio)
-    private func makeDiarizationInput(from urls: [URL], in directory: URL) throws -> URL {
+    /// Concatenate in the caller's timeline order. Keep a single converter
+    /// for each input file so resampling phase survives buffer boundaries.
+    static func makeDiarizationInput(from urls: [URL], in directory: URL) throws -> URL {
         let outputURL = directory.appendingPathComponent("audio.caf")
-        let outputSettings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatLinearPCM),
-            AVSampleRateKey: AudioSampleConverter.speechSampleRate,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMIsBigEndianKey: false
-        ]
-
-        var outputFile: AVAudioFile?
-        defer { outputFile = nil }
-
-        for url in urls.sorted(by: { $0.path < $1.path }) {
-            let inputFile: AVAudioFile
-            do {
-                inputFile = try AVAudioFile(forReading: url)
-            } catch {
-                throw FluidAudioDiarizerError.failed(error.localizedDescription)
-            }
-            let frameCount = Int(inputFile.length)
-            guard frameCount > 0,
-                  let inputBuffer = AVAudioPCMBuffer(
-                      pcmFormat: inputFile.processingFormat,
-                      frameCapacity: AVAudioFrameCount(frameCount)
-                  )
-            else { continue }
-            do {
-                try inputFile.read(into: inputBuffer)
-            } catch {
-                throw FluidAudioDiarizerError.failed(error.localizedDescription)
-            }
-            guard let channel = inputBuffer.floatChannelData?[0] else {
-                throw FluidAudioDiarizerError.failed("The archived audio is not readable PCM.")
-            }
-
-            let inputSamples = Array(
-                UnsafeBufferPointer(start: channel, count: Int(inputBuffer.frameLength))
-            )
-            let samples: [Float]
-            do {
-                samples = try AudioSampleConverter.resample(
-                    inputSamples,
-                    from: inputFile.processingFormat.sampleRate,
-                    to: AudioSampleConverter.speechSampleRate
-                )
-            } catch {
-                throw FluidAudioDiarizerError.failed(error.localizedDescription)
-            }
-            guard !samples.isEmpty else { continue }
-
-            if outputFile == nil {
-                do {
-                    outputFile = try AVAudioFile(
-                        forWriting: outputURL,
-                        settings: outputSettings,
-                        commonFormat: .pcmFormatFloat32,
-                        interleaved: false
-                    )
-                } catch {
-                    throw FluidAudioDiarizerError.failed(error.localizedDescription)
-                }
-            }
-            guard let outputFile,
-                  let outputBuffer = AVAudioPCMBuffer(
-                      pcmFormat: outputFile.processingFormat,
-                      frameCapacity: AVAudioFrameCount(samples.count)
-                  ),
-                  let outputChannel = outputBuffer.floatChannelData?[0]
-            else {
-                throw FluidAudioDiarizerError.failed("The diarization audio buffer could not be created.")
-            }
-            outputBuffer.frameLength = AVAudioFrameCount(samples.count)
-            samples.withUnsafeBufferPointer { source in
-                guard let baseAddress = source.baseAddress else { return }
-                outputChannel.update(from: baseAddress, count: samples.count)
-            }
-            do {
-                try outputFile.write(from: outputBuffer)
-            } catch {
-                throw FluidAudioDiarizerError.failed(error.localizedDescription)
-            }
+        let sampleRate = AudioSampleConverter.speechSampleRate
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+              let outputBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16_384)
+        else {
+            throw FluidAudioDiarizerError.failed("The diarization audio buffer could not be created.")
         }
-
-        guard outputFile != nil else {
-            throw FluidAudioDiarizerError.noAudio
+        let output = try AVAudioFile(forWriting: outputURL, settings: format.settings)
+        var expectedFrames = 0.0
+        for url in urls {
+            try Task.checkCancellation()
+            let input = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+            guard input.length > 0 else { continue }
+            let inputFormat = input.processingFormat
+            expectedFrames += Double(input.length) * sampleRate / inputFormat.sampleRate
+            guard let endFrame = AVAudioFramePosition(exactly: expectedFrames.rounded()) else {
+                throw FluidAudioDiarizerError.failed("The archived audio has an invalid duration.")
+            }
+            try convert(input, into: output, buffer: outputBuffer, through: endFrame)
         }
+        guard output.framePosition > 0 else { throw FluidAudioDiarizerError.noAudio }
         return outputURL
+    }
+
+    private static func convert(
+        _ input: AVAudioFile,
+        into output: AVAudioFile,
+        buffer: AVAudioPCMBuffer,
+        through endFrame: AVAudioFramePosition
+    ) throws {
+        guard let converter = AVAudioConverter(from: input.processingFormat, to: buffer.format),
+              let inputBuffer = AVAudioPCMBuffer(pcmFormat: input.processingFormat, frameCapacity: 16_384)
+        else {
+            throw FluidAudioDiarizerError.failed("The archived audio format could not be converted.")
+        }
+        converter.downmix = true
+        converter.primeMethod = .none
+        let readError = OSAllocatedUnfairLock<Error?>(initialState: nil)
+        // AVAudioConverter accesses this buffer only inside the synchronous callback.
+        nonisolated(unsafe) let readBuffer = inputBuffer
+
+        while output.framePosition < endFrame {
+            try Task.checkCancellation()
+            var conversionError: NSError?
+            let status = converter.convert(to: buffer, error: &conversionError) { requested, status in
+                do {
+                    let remaining = max(0, input.length - input.framePosition)
+                    let count = min(AVAudioFramePosition(requested), AVAudioFramePosition(readBuffer.frameCapacity), remaining)
+                    if count > 0 {
+                        try input.read(into: readBuffer, frameCount: AVAudioFrameCount(count))
+                        if readBuffer.frameLength > 0 {
+                            status.pointee = .haveData
+                            return readBuffer
+                        }
+                    }
+                } catch {
+                    readError.withLock { $0 = error }
+                }
+                status.pointee = .endOfStream
+                return nil
+            }
+            if let error = readError.withLock({ $0 }) { throw error }
+            if let conversionError { throw conversionError }
+            if status == .error || status == .inputRanDry {
+                throw FluidAudioDiarizerError.failed("The archived audio could not be converted.")
+            }
+
+            // Sample-rate conversion can emit a few extra frames at EOF.
+            // Cap the output to the rounded source timeline across all files.
+            buffer.frameLength = AVAudioFrameCount(min(AVAudioFramePosition(buffer.frameLength), endFrame - output.framePosition))
+            if buffer.frameLength > 0 { try output.write(from: buffer) }
+            if status == .endOfStream || buffer.frameLength == 0 { break }
+        }
     }
 #endif
 }

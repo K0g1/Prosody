@@ -42,23 +42,20 @@ public enum AudioSampleConverter {
             return samples
         }
 
-        guard let inputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: inputSampleRate,
-            channels: 1,
-            interleaved: false
-        ), let outputFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: outputSampleRate,
-            channels: 1,
-            interleaved: false
-        ), let inputBuffer = AVAudioPCMBuffer(
-            pcmFormat: inputFormat,
-            frameCapacity: AVAudioFrameCount(samples.count)
-        ), let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
+        let estimatedFrames = ceil(Double(samples.count) * (outputSampleRate / inputSampleRate)) + 32
+        guard let inputFrames = AVAudioFrameCount(exactly: samples.count),
+              let outputFrames = AVAudioFrameCount(exactly: estimatedFrames),
+              let inputFormat = AVAudioFormat(
+                  standardFormatWithSampleRate: inputSampleRate, channels: 1
+              ),
+              let outputFormat = AVAudioFormat(
+                  standardFormatWithSampleRate: outputSampleRate, channels: 1
+              ),
+              let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: inputFrames),
+              let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
         else { throw AudioSampleConverterError.invalidFormat }
 
-        inputBuffer.frameLength = AVAudioFrameCount(samples.count)
+        inputBuffer.frameLength = inputFrames
         samples.withUnsafeBufferPointer { source in
             guard let baseAddress = source.baseAddress,
                   let destination = inputBuffer.floatChannelData?[0]
@@ -66,12 +63,9 @@ public enum AudioSampleConverter {
             destination.update(from: baseAddress, count: samples.count)
         }
 
-        let outputCapacity = AVAudioFrameCount(
-            max(1, ceil(Double(samples.count) * outputSampleRate / inputSampleRate) + 32)
-        )
         guard let outputBuffer = AVAudioPCMBuffer(
             pcmFormat: outputFormat,
-            frameCapacity: outputCapacity
+            frameCapacity: outputFrames
         ) else { throw AudioSampleConverterError.invalidFormat }
 
         let providedInput = OSAllocatedUnfairLock(initialState: false)

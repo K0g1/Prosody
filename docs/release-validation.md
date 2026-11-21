@@ -20,7 +20,9 @@ and raw machine logs out of the repository.
 
 - Run [the test script](../script/test.sh) with Xcode selected. It runs Swift
   Testing and XCTest plus the standalone service checks, which cover storage,
-  recording lifecycle, recovery, archive formats, transport, and settings.
+  recording lifecycle, recovery, archive formats, transport, and settings. The
+  standalone Command Line Tools fallback provides service checks and can omit
+  the package suite. Use Xcode to meet the release gate.
 - With Parakeet Unified installed, run [the model benchmark](../script/benchmark_dictation.sh)
   with **--thorough --compare-archive**. It checks actual transcript quality,
   no-ops, fallback and archive rollover using generated fixtures, then compares

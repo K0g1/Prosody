@@ -37,33 +37,16 @@ public struct SpeakerAlignment: Sendable {
     ) -> [SpeakerAttributedSegment] {
         guard !words.isEmpty else { return [] }
 
-        var groups: [(speakerID: String, confidence: Float?, words: [TranscriptWord])] = []
+        var groups: [WordGroup] = []
         for word in words.sorted(by: wordOrder) {
-            let interval = bestInterval(for: word, in: speakers)
+            let interval = bestInterval(for: word.start, end: word.end, in: speakers)
             let speakerID = interval?.speakerID ?? "unknown"
-            if let last = groups.last, last.speakerID == speakerID {
-                groups[groups.count - 1].words.append(word)
-                if let confidence = interval?.confidence {
-                    groups[groups.count - 1].confidence = combinedConfidence(
-                        groups[groups.count - 1].confidence,
-                        confidence
-                    )
-                }
-            } else {
-                groups.append((speakerID, interval?.confidence, [word]))
+            if groups.last?.speakerID != speakerID {
+                groups.append(WordGroup(speakerID: speakerID))
             }
+            groups[groups.count - 1].append(word, confidence: interval?.confidence)
         }
-
-        return groups.map { group in
-            SpeakerAttributedSegment(
-                speakerID: group.speakerID,
-                start: group.words.first?.start ?? 0,
-                end: group.words.last?.end ?? 0,
-                text: group.words.map(\.text).joined(separator: " "),
-                words: group.words,
-                confidence: group.confidence
-            )
-        }
+        return groups.map(\.segment)
     }
 
     /// Applies timed speaker assignments while preserving all transcript
@@ -77,6 +60,11 @@ public struct SpeakerAlignment: Sendable {
         result.reserveCapacity(segments.count)
 
         for segment in segments {
+            // Manual speaker names are attached to the saved segment.
+            if segment.wasUserEdited {
+                result.append(segment)
+                continue
+            }
             if segment.words.isEmpty {
                 var copy = segment
                 if let interval = bestInterval(for: segment.start, end: segment.end, in: intervals) {
@@ -119,31 +107,54 @@ public struct SpeakerAlignment: Sendable {
         return result
     }
 
-    private func bestInterval(for word: TranscriptWord, in intervals: [SpeakerInterval]) -> SpeakerInterval? {
-        bestInterval(for: word.start, end: word.end, in: intervals)
-    }
-
     private func bestInterval(
         for start: TimeInterval,
         end: TimeInterval,
         in intervals: [SpeakerInterval]
     ) -> SpeakerInterval? {
-        intervals
-            .map { interval in (interval, overlap(start: start, end: end, interval: interval)) }
-            .filter { $0.1 > 0 || ($0.0.start <= start && start <= $0.0.end) }
-            .max { lhs, rhs in
-                if lhs.1 != rhs.1 { return lhs.1 < rhs.1 }
-                return lhs.0.start > rhs.0.start
-            }?.0
+        var best: SpeakerInterval?
+        var bestOverlap = 0.0
+        for interval in intervals {
+            let overlap = max(0, min(end, interval.end) - max(start, interval.start))
+            guard overlap > 0 || (interval.start <= start && start <= interval.end) else { continue }
+            if overlap > bestOverlap || (overlap == bestOverlap && interval.start < (best?.start ?? .infinity)) {
+                best = interval
+                bestOverlap = overlap
+            }
+        }
+        return best
     }
 
-    private func overlap(start: TimeInterval, end: TimeInterval, interval: SpeakerInterval) -> TimeInterval {
-        max(0, min(end, interval.end) - max(start, interval.start))
-    }
+    private struct WordGroup {
+        let speakerID: String
+        private var words: [TranscriptWord] = []
+        private var end: TimeInterval = 0
+        private var confidenceTotal: Double = 0
+        private var confidenceCount = 0
 
-    private func combinedConfidence(_ lhs: Float?, _ rhs: Float) -> Float {
-        guard let lhs else { return rhs }
-        return (lhs + rhs) / 2
+        init(speakerID: String) {
+            self.speakerID = speakerID
+        }
+
+        mutating func append(_ word: TranscriptWord, confidence: Float?) {
+            words.append(word)
+            end = max(end, word.end)
+            if let confidence, confidence.isFinite {
+                confidenceTotal += Double(confidence)
+                confidenceCount += 1
+            }
+        }
+
+        var segment: SpeakerAttributedSegment {
+            SpeakerAttributedSegment(
+                speakerID: speakerID,
+                start: words.first?.start ?? 0,
+                end: end,
+                text: words.map(\.text).joined(separator: " "),
+                words: words,
+                confidence: confidenceCount > 0 ? Float(confidenceTotal / Double(confidenceCount)) : nil
+            )
+        }
     }
 
     private func wordOrder(_ lhs: TranscriptWord, _ rhs: TranscriptWord) -> Bool {

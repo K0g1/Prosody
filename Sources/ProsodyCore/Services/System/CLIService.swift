@@ -8,8 +8,13 @@ final class CLIService {
     private let queue = DispatchQueue(label: "prosody.cli")
     private var listener: NWListener?
     private var lockDescriptor: Int32 = -1
-    private var connections: [UUID: NWConnection] = [:]
-    private var jobs: [UUID: Task<Void, Never>] = [:]
+    private struct Client {
+        let connection: NWConnection
+        var requestDeadline: Task<Void, Never>?
+        var job: Task<Void, Never>?
+    }
+
+    private var clients: [UUID: Client] = [:]
 
     var installationURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/prosody")
@@ -81,9 +86,13 @@ final class CLIService {
                 }
             }
         }
-        listener.newConnectionHandler = { [weak self, weak model] connection in
+        listener.newConnectionHandler = { [weak self, weak model, weak listener] connection in
             Task { @MainActor in
-                guard let self, let model, model.preferences.cliEnabled else { connection.cancel(); return }
+                guard let self, let model, let listener,
+                      self.listener === listener, model.preferences.cliEnabled else {
+                    connection.cancel()
+                    return
+                }
                 self.accept(connection, model: model)
             }
         }
@@ -96,10 +105,7 @@ final class CLIService {
         guard listener != nil else { return }
         listener?.cancel()
         listener = nil
-        for job in jobs.values { job.cancel() }
-        for connection in connections.values { connection.cancel() }
-        jobs.removeAll()
-        connections.removeAll()
+        for id in Array(clients.keys) { disconnect(id) }
         if let path = try? CLISocket.socketURL() { try? FileManager.default.removeItem(at: path) }
         if lockDescriptor >= 0 {
             close(lockDescriptor)
@@ -108,9 +114,15 @@ final class CLIService {
     }
 
     private func accept(_ connection: NWConnection, model: AppModel) {
-        guard connections.count < 16 else { connection.cancel(); return }
+        guard clients.count < 16 else { connection.cancel(); return }
         let id = UUID()
-        connections[id] = connection
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        clients[id] = Client(connection: connection, requestDeadline: Task { [weak self] in
+            do { try await Task.sleep(until: deadline, clock: .continuous) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            self?.disconnect(id)
+        })
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed, .cancelled: Task { @MainActor in self?.disconnect(id) }
@@ -120,7 +132,12 @@ final class CLIService {
         connection.start(queue: queue)
         CLISocket.receive(CLIRequest.self, on: connection, limit: CLISocket.requestLimit) { [weak self, weak model] result in
             Task { @MainActor in
-                guard let self, let model, self.connections[id] != nil else { connection.cancel(); return }
+                guard let self else { connection.cancel(); return }
+                guard self.clients[id] != nil else { return }
+                guard let model else { self.disconnect(id); return }
+                // The deadline covers receiving the request. Transcription may take longer.
+                self.clients[id]?.requestDeadline?.cancel()
+                self.clients[id]?.requestDeadline = nil
                 // Keep the connection open until the client reads the
                 // response. contentProcessed only confirms a local send.
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] _, _, _, _ in
@@ -130,7 +147,7 @@ final class CLIService {
                     self.reply(CLIResponse(error: "Invalid CLI request."), to: id)
                     return
                 }
-                self.jobs[id] = Task {
+                self.clients[id]?.job = Task {
                     let response = await model.runFileAutomation(request)
                     if !Task.isCancelled { self.reply(response, to: id) }
                 }
@@ -139,7 +156,7 @@ final class CLIService {
     }
 
     private func reply(_ response: CLIResponse, to id: UUID) {
-        guard let connection = connections[id] else { return }
+        guard let connection = clients[id]?.connection else { return }
         do {
             try CLISocket.send(response, on: connection, limit: CLISocket.responseLimit) { [weak self] error in
                 if error != nil { Task { @MainActor in self?.disconnect(id) } }
@@ -150,7 +167,9 @@ final class CLIService {
     }
 
     private func disconnect(_ id: UUID) {
-        jobs.removeValue(forKey: id)?.cancel()
-        connections.removeValue(forKey: id)?.cancel()
+        guard let client = clients.removeValue(forKey: id) else { return }
+        client.requestDeadline?.cancel()
+        client.job?.cancel()
+        client.connection.cancel()
     }
 }

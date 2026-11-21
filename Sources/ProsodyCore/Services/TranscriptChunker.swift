@@ -53,13 +53,14 @@ public struct TranscriptChunking: Sendable {
         var result: [TranscriptChunk] = []
         var current: [TranscriptSegment] = []
         var currentCharacters = 0
+        var currentEnd: TimeInterval = 0
 
         func flush() {
-            guard let first = current.first, let last = current.last else { return }
+            guard let first = current.first else { return }
             result.append(TranscriptChunk(
                 id: result.count,
                 start: first.start,
-                end: last.end,
+                end: currentEnd,
                 segments: current
             ))
         }
@@ -68,13 +69,15 @@ public struct TranscriptChunking: Sendable {
             guard let previous = current.last else {
                 current = [segment]
                 currentCharacters = segment.text.count
+                currentEnd = segment.end
                 continue
             }
 
-            let duration = max(0, previous.end - current[0].start)
-            let proposedDuration = max(0, segment.end - current[0].start)
+            let duration = max(0, currentEnd - current[0].start)
+            let proposedEnd = max(currentEnd, segment.end)
+            let proposedDuration = max(0, proposedEnd - current[0].start)
             let proposedCharacters = currentCharacters + segment.text.count + 1
-            let silenceBoundary = segment.start - previous.end >= options.silenceGap
+            let silenceBoundary = segment.start - currentEnd >= options.silenceGap
             let speakerBoundary = previous.speakerID != segment.speakerID
             let targetBoundary = duration >= options.targetDuration && (silenceBoundary || speakerBoundary)
             let hardBoundary = proposedDuration > options.maximumDuration
@@ -84,9 +87,11 @@ public struct TranscriptChunking: Sendable {
                 flush()
                 current = [segment]
                 currentCharacters = segment.text.count
+                currentEnd = segment.end
             } else {
                 current.append(segment)
                 currentCharacters = proposedCharacters
+                currentEnd = proposedEnd
             }
         }
         flush()

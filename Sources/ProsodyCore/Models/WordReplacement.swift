@@ -21,16 +21,17 @@ public struct WordReplacementProcessor: Sendable {
 
     public init(rules: [WordReplacement]) {
         var seen: Set<String> = []
-        let rules = rules.filter {
-            let text = $0.original.trimmingCharacters(in: .whitespacesAndNewlines)
-            return !text.isEmpty && seen.insert(text.lowercased()).inserted
+        let rules = rules.compactMap { rule -> (original: String, replacement: String)? in
+            let original = rule.original.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !original.isEmpty, seen.insert(original.lowercased()).inserted else { return nil }
+            return (original, rule.replacement)
         }.sorted { $0.original.count > $1.original.count }
         replacements = rules.map(\.replacement)
         let alternatives = rules.map {
-            "(" + NSRegularExpression.escapedPattern(for: $0.original.trimmingCharacters(in: .whitespacesAndNewlines)) + ")"
+            "(" + NSRegularExpression.escapedPattern(for: $0.original) + ")"
         }.joined(separator: "|")
         expression = alternatives.isEmpty ? nil : try? NSRegularExpression(
-            pattern: "(?<![\\p{L}\\p{N}_])(?:" + alternatives + ")(?![\\p{L}\\p{N}_])",
+            pattern: "(?<![\\p{L}\\p{M}\\p{N}_])(?:" + alternatives + ")(?![\\p{L}\\p{M}\\p{N}_])",
             options: [.caseInsensitive]
         )
     }

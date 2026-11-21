@@ -6,6 +6,7 @@ public struct StreamingTranscriptAssembler: Sendable {
     private let source: AudioSource
     private let configuration: TranscriptSegmentationConfiguration
     private var words: [TranscriptWord] = []
+    private var segmentEnd: TimeInterval = 0
     private var segmentID = UUID()
     private var pendingWordBoundary = false
     public private(set) var finalized: [TranscriptSegment] = []
@@ -34,7 +35,7 @@ public struct StreamingTranscriptAssembler: Sendable {
         if startsWord, let last = words.last,
            last.text.last.map({ ".!?".contains($0) }) == true
             || words.count >= configuration.maximumWordsPerSegment
-            || start - last.end >= configuration.pauseThreshold {
+            || start - segmentEnd >= configuration.pauseThreshold {
             if let segment = flush() { completed.append(segment) }
         }
         if startsWord || words.isEmpty {
@@ -43,6 +44,7 @@ public struct StreamingTranscriptAssembler: Sendable {
             words[words.count - 1].text += text
             words[words.count - 1].end = max(words[words.count - 1].end, end)
         }
+        segmentEnd = max(segmentEnd, end)
         return completed
     }
 
@@ -53,14 +55,15 @@ public struct StreamingTranscriptAssembler: Sendable {
         guard let segment = makeSegment(isFinal: true) else { return nil }
         finalized.append(segment)
         words.removeAll(keepingCapacity: true)
+        segmentEnd = 0
         segmentID = UUID()
         return segment
     }
 
     private func makeSegment(isFinal: Bool) -> TranscriptSegment? {
-        guard let first = words.first, let last = words.last else { return nil }
+        guard let first = words.first else { return nil }
         return TranscriptSegment(id: segmentID, source: source, start: first.start,
-                                 end: last.end, text: words.map(\.text).joined(separator: " "),
+                                 end: segmentEnd, text: words.map(\.text).joined(separator: " "),
                                  words: words, isFinal: isFinal)
     }
 }

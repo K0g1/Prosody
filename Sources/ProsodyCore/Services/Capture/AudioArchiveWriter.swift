@@ -82,7 +82,7 @@ enum AudioArchiveMerger {
         guard !validSourceFiles.isEmpty else { return [] }
 
         try fileManager.createDirectory(at: finalRoot, withIntermediateDirectories: true)
-        var moved: [URL] = []
+        var planned: [(source: URL, destination: URL, alreadyRetained: Bool)] = []
         for sourceURL in validSourceFiles.sorted(by: { $0.path < $1.path }) {
             guard isWithin(sourceURL, root: sourceRoot) else {
                 throw AudioArchiveMergerError.unsupportedLocation(sourceURL)
@@ -112,14 +112,27 @@ enum AudioArchiveMerger {
                 guard values.isDirectory != true else {
                     throw AudioArchiveMergerError.destinationIsDirectory(destination)
                 }
-                if confidentlyIdentical(sourceURL, destination) {
-                    try fileManager.removeItem(at: sourceURL)
-                    continue
+                guard confidentlyIdentical(sourceURL, destination) else {
+                    throw AudioArchiveMergerError.conflictingArtifact(source: sourceURL, destination: destination)
                 }
-                throw AudioArchiveMergerError.conflictingArtifact(source: sourceURL, destination: destination)
+                planned.append((sourceURL, destination, true))
+            } else {
+                planned.append((sourceURL, destination, false))
             }
+        }
 
-            try fileManager.moveItem(at: sourceURL, to: destination)
+        // Check the entire batch before moving any chunk. A later conflicting
+        // destination should leave the source archive intact for retry.
+        var moved: [URL] = []
+        for (source, destination, alreadyRetained) in planned {
+            if alreadyRetained {
+                guard confidentlyIdentical(source, destination) else {
+                    throw AudioArchiveMergerError.conflictingArtifact(source: source, destination: destination)
+                }
+                try fileManager.removeItem(at: source)
+                continue
+            }
+            try fileManager.moveItem(at: source, to: destination)
             moved.append(destination)
         }
         return moved
@@ -129,7 +142,11 @@ enum AudioArchiveMerger {
         guard SessionAssetResolver.audioFileExtensions.contains(url.pathExtension.lowercased()),
               let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
               values.isRegularFile == true,
-              (values.fileSize ?? 0) > 0
+              (values.fileSize ?? 0) > 0,
+              let file = try? AVAudioFile(forReading: url),
+              file.length > 0,
+              file.processingFormat.sampleRate.isFinite,
+              file.processingFormat.sampleRate > 0
         else { return false }
         return true
     }
@@ -155,6 +172,11 @@ enum AudioArchiveMerger {
 /// boundaries. A chunk is closed at roughly sixty seconds, which bounds the
 /// amount of audio lost if Prosody exits unexpectedly.
 public actor AudioArchiveWriter {
+    // ExtAudioFile's mono M4A encoder can reject rates above 48 kHz on the
+    // first write even when the file initializer and bitrate probe succeed.
+    private static let archiveSampleRates: [Double] = [8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000]
+    private static let fallbackSampleRate = 48_000.0
+
     public let directoryURL: URL
     private let bitRate: Int
 
@@ -163,6 +185,7 @@ public actor AudioArchiveWriter {
     private var framesInChunk: [AudioSource: Int] = [:]
     private var nextChunkIndex: [AudioSource: Int] = [:]
     private var sampleRates: [AudioSource: Double] = [:]
+    private var resamplers: [AudioSource: MonoPCMResampler] = [:]
 
     public init(directoryURL: URL, bitRate: Int = 96_000) {
         self.directoryURL = directoryURL
@@ -176,32 +199,37 @@ public actor AudioArchiveWriter {
         else { throw AudioArchiveWriterError.invalidPacket }
 
         let source = packet.source
-        if let existingRate = sampleRates[source],
-           abs(existingRate - packet.sampleRate) > 0.5 {
+        // Preserve native rates supported by the archive encoder. Reject
+        // tiny fluctuations when matching a nominal hardware sample rate.
+        let inputRate = Self.archiveSampleRates.first { abs($0 - packet.sampleRate) < 0.5 } ?? packet.sampleRate
+        let archiveRate = Self.archiveSampleRates.contains(inputRate) ? inputRate : Self.fallbackSampleRate
+        if sampleRates[source] != inputRate {
+            try finishResampling(for: source)
             closeCurrentChunk(for: source)
+            if inputRate != archiveRate {
+                resamplers[source] = try MonoPCMResampler(from: inputRate, to: archiveRate, primeMethod: .normal)
+            }
+            sampleRates[source] = inputRate
         }
-        sampleRates[source] = packet.sampleRate
+        let samples = try resamplers[source]?.resample(packet.samples) ?? packet.samples
+        try append(samples, for: source, sampleRate: archiveRate)
+    }
 
-        let chunkFrameLimit = max(
-            1,
-            Int((AppConstants.archiveSegmentSeconds * packet.sampleRate).rounded(.down))
-        )
+    private func append(_ samples: [Float], for source: AudioSource, sampleRate: Double) throws {
+        let chunkFrameLimit = Int((AppConstants.archiveSegmentSeconds * sampleRate).rounded(.down))
         var offset = 0
-        while offset < packet.samples.count {
+        while offset < samples.count {
             let written = framesInChunk[source, default: 0]
-            let available = max(1, chunkFrameLimit - written)
-            let count = min(available, packet.samples.count - offset)
-            let file = try openFileIfNeeded(for: source, sampleRate: packet.sampleRate)
-            try write(
-                packet.samples,
-                offset: offset,
-                count: count,
-                to: file
-            )
-            framesInChunk[source, default: 0] += count
+            let count = min(chunkFrameLimit - written, samples.count - offset)
+            if let file = files[source] {
+                try write(samples[offset..<(offset + count)], to: file)
+            } else {
+                try openChunk(for: source, sampleRate: sampleRate, firstSamples: samples[offset..<(offset + count)])
+            }
+            framesInChunk[source] = written + count
             offset += count
 
-            if framesInChunk[source, default: 0] >= chunkFrameLimit {
+            if written + count >= chunkFrameLimit {
                 closeCurrentChunk(for: source)
             }
         }
@@ -210,18 +238,19 @@ public actor AudioArchiveWriter {
     /// Closes the current files and returns every completed and in-progress
     /// chunk. The URLs remain available for moveArtifacts or discard.
     public func finish() throws -> [URL] {
-        files.removeAll()
+        defer { closeFiles() }
+        for source in AudioSource.allCases {
+            try finishResampling(for: source)
+        }
         return allFileURLs()
     }
 
     /// Closes temporary files and removes them after the final transcript has
     /// been committed when the user has disabled audio retention.
     public func discard() throws {
-        files.removeAll()
+        closeFiles()
         fileURLs.removeAll()
-        framesInChunk.removeAll()
         nextChunkIndex.removeAll()
-        sampleRates.removeAll()
         if FileManager.default.fileExists(atPath: directoryURL.path) {
             try FileManager.default.removeItem(at: directoryURL)
         }
@@ -231,34 +260,31 @@ public actor AudioArchiveWriter {
     /// session directory. Missing files are harmless for a silent source, and
     /// an existing valid destination chunk is preserved on retry.
     public func moveArtifacts(to finalDirectoryURL: URL) throws -> [URL] {
-        files.removeAll()
+        let urls = try finish()
         let finalAudioDirectory = finalDirectoryURL.appendingPathComponent("audio", isDirectory: true)
         return try AudioArchiveMerger.merge(
-            allFileURLs(),
+            urls,
             from: directoryURL,
             into: finalAudioDirectory
         )
     }
 
-    private func openFileIfNeeded(for source: AudioSource, sampleRate: Double) throws -> AVAudioFile {
-        if let file = files[source] {
-            return file
-        }
-
+    private func openChunk(for source: AudioSource, sampleRate: Double, firstSamples: ArraySlice<Float>) throws {
+        let fileManager = FileManager.default
         let sourceDirectory = directoryURL.appendingPathComponent(source.rawValue, isDirectory: true)
-        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
         let index = nextChunkIndex[source, default: 0] + 1
         let url = sourceDirectory.appendingPathComponent(String(format: "%06d.m4a", index))
+        guard !fileManager.fileExists(atPath: url.path) else {
+            throw AudioArchiveWriterError.cannotCreateFile("An audio chunk already exists at \(url.lastPathComponent).")
+        }
+
         var settings: [String: Any] = [
+            AVAudioFileTypeKey: Int(kAudioFileM4AType),
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
             AVSampleRateKey: sampleRate,
             AVNumberOfChannelsKey: 1
         ]
-        // Microphones can deliver native 8/16/24 kHz PCM even when system
-        // capture uses 48 kHz. AAC rejects the requested quality bitrate when
-        // it exceeds the limits for that format (Core Audio '!dat'). Query
-        // the actual encoder instead of assuming every rate supports 96/192 kbps.
-        // If it cannot report applicable rates, keep its format-specific default.
         if let input = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                      sampleRate: sampleRate, channels: 1, interleaved: false),
            let output = AVAudioFormat(settings: settings),
@@ -268,38 +294,54 @@ public actor AudioArchiveWriter {
             settings[AVEncoderBitRateKey] = selectedRate
         }
 
+        // The on-disk encoder can reject settings accepted by AVAudioConverter.
+        // Commit the chunk index only after audio has been accepted.
+        let file: AVAudioFile
         do {
-            let file = try AVAudioFile(forWriting: url, settings: settings)
-            files[source] = file
-            fileURLs[source, default: []].append(url)
-            nextChunkIndex[source] = index
-            framesInChunk[source] = 0
-            return file
+            do {
+                file = try createChunk(at: url, settings: settings, firstSamples: firstSamples)
+            } catch where settings.removeValue(forKey: AVEncoderBitRateKey) != nil {
+                file = try createChunk(at: url, settings: settings, firstSamples: firstSamples)
+            }
         } catch {
             throw AudioArchiveWriterError.cannotCreateFile(
-                "Could not create the \(source.rawValue) audio file at \(Int(sampleRate)) Hz: \(error.localizedDescription)")
+                "Could not write the \(source.rawValue) audio file at \(Int(sampleRate)) Hz: \(error.localizedDescription)"
+            )
+        }
+        files[source] = file
+        fileURLs[source, default: []].append(url)
+        nextChunkIndex[source] = index
+    }
+
+    private func createChunk(
+        at url: URL, settings: [String: Any], firstSamples: ArraySlice<Float>
+    ) throws -> AVAudioFile {
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+            do {
+                try write(firstSamples, to: file)
+            } catch {
+                file.close()
+                throw error
+            }
+            return file
+        } catch {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+            throw error
         }
     }
 
-    private func write(
-        _ samples: [Float],
-        offset: Int,
-        count: Int,
-        to file: AVAudioFile
-    ) throws {
-        guard offset >= 0, count > 0, offset + count <= samples.count,
-              let format = file.processingFormat as AVAudioFormat?,
-              let buffer = AVAudioPCMBuffer(
-                  pcmFormat: format,
-                  frameCapacity: AVAudioFrameCount(count)
-              ),
+    private func write(_ samples: ArraySlice<Float>, to file: AVAudioFile) throws {
+        guard let frames = AVAudioFrameCount(exactly: samples.count), frames > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frames),
               let channel = buffer.floatChannelData?[0]
         else { throw AudioArchiveWriterError.invalidPacket }
 
-        buffer.frameLength = AVAudioFrameCount(count)
+        buffer.frameLength = frames
         samples.withUnsafeBufferPointer { source in
-            guard let baseAddress = source.baseAddress else { return }
-            channel.update(from: baseAddress.advanced(by: offset), count: count)
+            if let address = source.baseAddress { channel.update(from: address, count: source.count) }
         }
         do {
             try file.write(from: buffer)
@@ -308,9 +350,25 @@ public actor AudioArchiveWriter {
         }
     }
 
+    private func finishResampling(for source: AudioSource) throws {
+        guard let resampler = resamplers.removeValue(forKey: source) else { return }
+        // AVAudioConverter can retain the last frames even after accepting all
+        // input. Drain them before finalizing this source's last chunk.
+        let tail = try resampler.finish()
+        try append(tail, for: source, sampleRate: Self.fallbackSampleRate)
+    }
+
     private func closeCurrentChunk(for source: AudioSource) {
-        files.removeValue(forKey: source)
-        framesInChunk[source] = 0
+        files.removeValue(forKey: source)?.close()
+        framesInChunk.removeValue(forKey: source)
+    }
+
+    private func closeFiles() {
+        for file in files.values { file.close() }
+        files.removeAll()
+        framesInChunk.removeAll()
+        sampleRates.removeAll()
+        resamplers.removeAll()
     }
 
     private func allFileURLs() -> [URL] {

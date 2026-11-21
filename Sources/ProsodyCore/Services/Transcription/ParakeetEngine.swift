@@ -28,7 +28,11 @@ public actor ParakeetEngine: STTEngine {
     )
 
     private let segmentationConfiguration: TranscriptSegmentationConfiguration
-    private let inventory: STTModelManager
+    private let installedModelURL: @Sendable (SpeechModel) async throws -> URL
+    private let loadUnifiedManager: @Sendable (URL) async throws -> StreamingUnifiedAsrManager
+    private var generation: UInt64 = 0
+    private var openingSources: Set<AudioSource> = []
+    private var sessions: [AudioSource: any ParakeetEngineSession] = [:]
     private var modelDirectory: URL?
     private var managers: [AudioSource: StreamingUnifiedAsrManager] = [:]
     private var preparedManager: StreamingUnifiedAsrManager?
@@ -38,8 +42,21 @@ public actor ParakeetEngine: STTEngine {
         segmentationConfiguration: TranscriptSegmentationConfiguration = .persisted(),
         inventory: STTModelManager = STTModelManager()
     ) {
+        self.init(
+            segmentationConfiguration: segmentationConfiguration,
+            installedModelURL: { try await inventory.installedURL(for: $0) },
+            loadUnifiedManager: ParakeetDictationModel.loadManager(from:)
+        )
+    }
+
+    init(
+        segmentationConfiguration: TranscriptSegmentationConfiguration = .init(),
+        installedModelURL: @escaping @Sendable (SpeechModel) async throws -> URL,
+        loadUnifiedManager: @escaping @Sendable (URL) async throws -> StreamingUnifiedAsrManager
+    ) {
         self.segmentationConfiguration = segmentationConfiguration
-        self.inventory = inventory
+        self.installedModelURL = installedModelURL
+        self.loadUnifiedManager = loadUnifiedManager
     }
 
     public func prepare(
@@ -49,51 +66,119 @@ public actor ParakeetEngine: STTEngine {
         guard let speechModel = SpeechModel(descriptor: model) else {
             throw ParakeetEngineError.unsupportedModel(model.id)
         }
+        try Task.checkCancellation()
+        let newGeneration = generation &+ 1
         await unload()
-        let directory = try await inventory.installedURL(for: speechModel)
+        try checkGeneration(newGeneration)
+        let directory = try await installedModelURL(speechModel)
+        try checkGeneration(newGeneration)
         if speechModel == .unified {
-            preparedManager = try await ParakeetDictationModel.loadManager(from: directory)
+            let manager = try await loadUnifiedManager(directory)
+            do {
+                try checkGeneration(newGeneration)
+            } catch {
+                await manager.cleanup()
+                throw error
+            }
+            preparedManager = manager
             modelDirectory = directory
         } else {
-            batchModel = try await BatchParakeetModel.load(speechModel, from: directory)
+            let model = try await BatchParakeetModel.load(speechModel, from: directory)
+            do {
+                try checkGeneration(newGeneration)
+            } catch {
+                await model.unload()
+                throw error
+            }
+            batchModel = model
         }
         progress(1)
     }
 
     public func makeSession(source: AudioSource) async throws -> any STTSession {
-        if let batchModel {
-            return batchModel.makeSession(source: source, configuration: segmentationConfiguration)
+        try Task.checkCancellation()
+        guard batchModel != nil || modelDirectory != nil else {
+            throw ParakeetEngineError.modelNotPrepared
         }
-        return ParakeetStreamingSession(source: source, manager: try await unifiedManager(for: source),
-                                       segmentationConfiguration: segmentationConfiguration)
-    }
+        guard openingSources.insert(source).inserted else { throw Self.sourceInUse }
+        let currentGeneration = generation
+        defer {
+            if generation == currentGeneration { openingSources.remove(source) }
+        }
 
-    private func unifiedManager(for source: AudioSource) async throws -> StreamingUnifiedAsrManager {
-        if let manager = managers[source] {
-            try await manager.reset()
-            return manager
+        if let session = sessions[source] {
+            guard await session.hasEnded else { throw Self.sourceInUse }
+            try checkGeneration(currentGeneration)
         }
-        guard let modelDirectory else { throw ParakeetEngineError.modelNotPrepared }
-        let manager: StreamingUnifiedAsrManager
-        if let preparedManager {
-            self.preparedManager = nil
-            manager = preparedManager
+
+        let session: any ParakeetEngineSession
+        if let batchModel {
+            session = batchModel.makeSession(source: source, configuration: segmentationConfiguration)
+        } else if let modelDirectory {
+            // Own the manager locally across loading/reset. Unload invalidates
+            // this reservation, and this invocation cleans up any late result.
+            let manager: StreamingUnifiedAsrManager
+            if let cached = managers.removeValue(forKey: source) {
+                manager = cached
+                do {
+                    try await manager.reset()
+                } catch {
+                    await manager.cleanup()
+                    throw error
+                }
+            } else if let preparedManager {
+                self.preparedManager = nil
+                manager = preparedManager
+            } else {
+                manager = try await loadUnifiedManager(modelDirectory)
+            }
+            do {
+                try checkGeneration(currentGeneration)
+            } catch {
+                await manager.cleanup()
+                throw error
+            }
+            managers[source] = manager
+            session = ParakeetStreamingSession(
+                source: source, manager: manager, segmentationConfiguration: segmentationConfiguration
+            )
         } else {
-            manager = try await ParakeetDictationModel.loadManager(from: modelDirectory)
+            throw ParakeetEngineError.modelNotPrepared
         }
-        managers[source] = manager
-        return manager
+        sessions[source] = session
+        return session
     }
 
     public func unload() async {
-        for manager in managers.values { await manager.cleanup() }
-        managers.removeAll()
-        await preparedManager?.cleanup()
-        preparedManager = nil
-        await batchModel?.unload()
-        batchModel = nil
+        // Detach the old generation before the first suspension.
+        generation &+= 1
+        let sessions = self.sessions
+        let managers = self.managers
+        let preparedManager = self.preparedManager
+        let batchModel = self.batchModel
+        self.sessions.removeAll()
+        self.managers.removeAll()
+        self.preparedManager = nil
+        self.batchModel = nil
         modelDirectory = nil
+        openingSources.removeAll()
+
+        for session in sessions.values { await session.cancel() }
+        for manager in managers.values { await manager.cleanup() }
+        await preparedManager?.cleanup()
+        await batchModel?.unload()
     }
+
+    private static let sourceInUse = STTError.failed("Parakeet is already in use for this audio source.")
+
+    private func checkGeneration(_ expected: UInt64) throws {
+        try Task.checkCancellation()
+        guard generation == expected else { throw CancellationError() }
+    }
+}
+
+protocol ParakeetEngineSession: STTSession {
+    var hasEnded: Bool { get async }
 }
 
 /// The recognizer leases a local model across live input and archive replay.
@@ -126,7 +211,7 @@ struct ParakeetDictationModel: DictationRecognitionModel {
     func unload() async { await manager.cleanup() }
 }
 
-public actor ParakeetStreamingSession: STTSession {
+public actor ParakeetStreamingSession: STTSession, ParakeetEngineSession {
     public nonisolated let updates: AsyncStream<STTUpdate>
 
     static let dictationWindows: (first: Int, stride: Int, frame: Int) = {
@@ -139,10 +224,13 @@ public actor ParakeetStreamingSession: STTSession {
     private let manager: StreamingUnifiedAsrManager
     private let publishesUpdates: Bool
     private var isFinished = false
+    private var finishing = false
     private var processing = false
     private var processingWaiters: [CheckedContinuation<Void, Never>] = []
     private var assembler: StreamingTranscriptAssembler
-    private var audioOrigin: TimeInterval?
+    private var timeline = ParakeetAudioTimeline()
+
+    var hasEnded: Bool { isFinished && !processing }
 
     public init(
         source: AudioSource,
@@ -175,7 +263,7 @@ public actor ParakeetStreamingSession: STTSession {
     @_spi(Validation)
     public func finishDictation(appending samples: [Float], startTime: TimeInterval, endTime: TimeInterval) async throws -> FinalTranscript {
         guard startTime.isFinite, startTime >= 0, endTime.isFinite, endTime >= startTime,
-              endTime >= (audioOrigin ?? startTime) else { throw STTError.invalidAudio }
+              endTime >= (timeline.startTime ?? startTime) else { throw STTError.invalidAudio }
         return try await finish(appending: samples, startTime: startTime, tokenEndLimit: endTime)
     }
 
@@ -184,9 +272,9 @@ public actor ParakeetStreamingSession: STTSession {
               startTime.isFinite, startTime >= 0 else {
             throw STTError.invalidAudio
         }
-        if audioOrigin == nil { audioOrigin = startTime }
         let buffer = try makeBuffer(samples: samples)
         try await manager.appendAudio(buffer)
+        timeline.append(sampleCount: samples.count, startTime: startTime)
     }
 
     public func finish() async throws -> FinalTranscript {
@@ -194,12 +282,17 @@ public actor ParakeetStreamingSession: STTSession {
     }
 
     private func finish(appending samples: [Float], startTime: TimeInterval, tokenEndLimit: TimeInterval) async throws -> FinalTranscript {
-        try beginProcessing()
+        try Task.checkCancellation()
+        guard !isFinished, !finishing else { throw STTError.sessionFinished }
+        finishing = true
+        if processing { await waitForProcessing() }
+        processing = true
         defer {
             isFinished = true
             continuation.finish()
             endProcessing()
         }
+        try checkProcessing()
         // Hand the last audio to finish without processing it as a non-final
         // window first. This avoids re-encoding on an exact chunk boundary.
         if !samples.isEmpty { try await bufferAudio(samples, startTime: startTime) }
@@ -219,14 +312,16 @@ public actor ParakeetStreamingSession: STTSession {
         continuation.finish()
         // Core ML may be between suspension points. Don't let a caller reset
         // or unload this manager until that in-flight operation has returned.
-        if processing {
-            await withCheckedContinuation { processingWaiters.append($0) }
-        }
+        if processing { await waitForProcessing() }
+    }
+
+    private func waitForProcessing() async {
+        await withCheckedContinuation { processingWaiters.append($0) }
     }
 
     private func beginProcessing() throws {
         try Task.checkCancellation()
-        guard !isFinished else { throw STTError.sessionFinished }
+        guard !isFinished, !finishing else { throw STTError.sessionFinished }
         guard !processing else { throw STTError.failed("Parakeet is already processing audio for this session.") }
         processing = true
     }
@@ -247,15 +342,16 @@ public actor ParakeetStreamingSession: STTSession {
         let tokens = await manager.consumeTokenTimings()
         try checkProcessing()
         guard !tokens.isEmpty else { return }
-        let origin = audioOrigin ?? 0
+        let endLimit = min(endLimit, timeline.endTime ?? endLimit)
         for token in tokens {
             guard token.startTime.isFinite, token.endTime.isFinite,
-                  token.startTime >= 0, token.endTime >= token.startTime else { continue }
+                  token.startTime >= 0, token.endTime >= token.startTime,
+                  let time = timeline.map(start: token.startTime, end: token.endTime) else { continue }
             // Keep a final subword that emitted on the added context frame,
             // without extending the transcript past actual microphone audio.
             let completed = assembler.append(token: token.token,
-                start: min(origin + token.startTime, endLimit),
-                end: min(origin + token.endTime, endLimit))
+                start: min(time.start, endLimit),
+                end: min(time.end, endLimit))
             if publishesUpdates {
                 for segment in completed {
                     continuation.yield(.final(source: source, segment: segment))

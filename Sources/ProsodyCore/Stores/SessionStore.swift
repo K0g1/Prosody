@@ -89,6 +89,10 @@ public actor SessionStore {
 
     @discardableResult
     public func save(_ document: SessionDocument) async throws -> URL {
+        try await saveToDisk(document)
+    }
+
+    @SessionStoreIO private func saveToDisk(_ document: SessionDocument) throws -> URL {
         let directory = sessionDirectoryURL(for: document.session.id)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
@@ -118,11 +122,7 @@ public actor SessionStore {
         let manifest = SessionManifest(session: savedSession)
         try AtomicFileWriter.encode(manifest, to: directory.appendingPathComponent("session.json"))
         let summary = makeSummary(manifest: manifest, directory: directory)
-        do { try await indexStore.upsert(summary) }
-        catch SessionIndexStoreError.invalidIndex {
-            _ = try await rebuildIndex()
-            try await indexStore.upsert(summary)
-        }
+        try updateIndex(summary)
         return directory
     }
 
@@ -141,7 +141,11 @@ public actor SessionStore {
         ))
     }
 
-    public func load(id: UUID) throws -> SessionDocument {
+    public func load(id: UUID) async throws -> SessionDocument {
+        try await loadFromDisk(id: id)
+    }
+
+    @SessionStoreIO private func loadFromDisk(id: UUID) throws -> SessionDocument {
         let directory = sessionDirectoryURL(for: id)
         guard FileManager.default.fileExists(atPath: directory.path) else {
             throw SessionStoreError.sessionNotFound
@@ -186,11 +190,15 @@ public actor SessionStore {
     }
 
     public func list() async throws -> [SessionSummary] {
+        try await listFromDisk()
+    }
+
+    @SessionStoreIO private func listFromDisk() throws -> [SessionSummary] {
         guard FileManager.default.fileExists(atPath: rootURL.appendingPathComponent(AppConstants.sessionIndexFileName).path) else {
-            return try await rebuildIndex()
+            return try rebuildIndex()
         }
         do {
-            let indexed = try await indexStore.load()
+            let indexed = try indexStore.read()
             var metadata: [UUID: SessionSummary] = [:]
             for summary in indexed where summary.sourceKind == nil || summary.hasRetainedAudio == nil {
                 let directory = sessionDirectoryURL(for: summary.id)
@@ -200,26 +208,35 @@ public actor SessionStore {
             }
             let summaries = metadata.isEmpty
                 ? indexed
-                : try await indexStore.backfillMetadata(metadata)
+                : try indexStore.backfillMetadataOnDisk(metadata)
             return summaries.map { summary in
                 var summary = summary
                 summary.folderPath = sessionDirectoryURL(for: summary.id).path
                 return summary
             }
         }
-        catch SessionIndexStoreError.invalidIndex { return try await rebuildIndex() }
+        catch SessionIndexStoreError.invalidIndex { return try rebuildIndex() }
     }
 
     /// Re-reads the small manifest and retained-audio presence after an archive
     /// move or import copy, then updates only that session's index entry.
     public func refreshSummary(id: UUID) async throws -> SessionSummary? {
+        try await refreshSummaryOnDisk(id: id)
+    }
+
+    @SessionStoreIO private func refreshSummaryOnDisk(id: UUID) throws -> SessionSummary? {
         let directory = sessionDirectoryURL(for: id)
         guard let summary = try readSummary(directory: directory) else { return nil }
-        try await indexStore.upsert(summary)
+        try updateIndex(summary)
         return summary
     }
 
-    private func rebuildIndex() async throws -> [SessionSummary] {
+    @SessionStoreIO private func updateIndex(_ summary: SessionSummary) throws {
+        do { try indexStore.upsertOnDisk(summary) }
+        catch SessionIndexStoreError.invalidIndex { _ = try rebuildIndex() }
+    }
+
+    @SessionStoreIO private func rebuildIndex() throws -> [SessionSummary] {
         guard FileManager.default.fileExists(atPath: rootURL.path) else { return [] }
         let directories = try FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
         let summaries = directories.compactMap { directory -> SessionSummary? in
@@ -229,7 +246,7 @@ public actor SessionStore {
             if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
             return $0.id.uuidString < $1.id.uuidString
         }
-        try await indexStore.replace(with: summaries)
+        try indexStore.replaceOnDisk(with: summaries)
         return summaries
     }
 
@@ -238,14 +255,19 @@ public actor SessionStore {
     }
 
     public func delete(id: UUID) async throws {
+        try await deleteFromDisk(id: id)
+    }
+
+    @SessionStoreIO private func deleteFromDisk(id: UUID) throws {
         let directory = sessionDirectoryURL(for: id)
         if FileManager.default.fileExists(atPath: directory.path) {
             try FileManager.default.removeItem(at: directory)
         }
-        try await indexStore.remove(id: id)
+        do { try indexStore.removeFromDisk(id: id) }
+        catch SessionIndexStoreError.invalidIndex { _ = try rebuildIndex() }
     }
 
-    private func readSummary(directory: URL) throws -> SessionSummary? {
+    @SessionStoreIO private func readSummary(directory: URL) throws -> SessionSummary? {
         let manifestURL = directory.appendingPathComponent("session.json")
         guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
         let manifest = try AtomicFileWriter.makeDecoder().decode(
@@ -255,7 +277,7 @@ public actor SessionStore {
         return makeSummary(manifest: manifest, directory: directory)
     }
 
-    private func makeSummary(manifest: SessionManifest, directory: URL) -> SessionSummary {
+    @SessionStoreIO private func makeSummary(manifest: SessionManifest, directory: URL) -> SessionSummary {
         let id = UUID(uuidString: directory.lastPathComponent) ?? manifest.id
         return SessionSummary(
             id: id,
@@ -269,7 +291,7 @@ public actor SessionStore {
         )
     }
 
-    private func resolvedSourceKind(for manifest: SessionManifest, directory: URL) -> String {
+    @SessionStoreIO private func resolvedSourceKind(for manifest: SessionManifest, directory: URL) -> String {
         if let sourceKind = manifest.sourceKind, !sourceKind.isEmpty {
             return sourceKind
         }
@@ -295,7 +317,7 @@ public actor SessionStore {
         }
     }
 
-    private func sessionDirectoryURL(for id: UUID) -> URL {
+    nonisolated private func sessionDirectoryURL(for id: UUID) -> URL {
         rootURL.appendingPathComponent(id.uuidString, isDirectory: true)
     }
 }

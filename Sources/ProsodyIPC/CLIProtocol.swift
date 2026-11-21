@@ -72,8 +72,10 @@ public enum CLISocket {
     public nonisolated static func send<T: Encodable>(_ message: T, on connection: NWConnection,
         limit: Int, completion: @escaping @Sendable (NWError?) -> Void) throws {
         let body = try JSONEncoder().encode(message)
-        guard body.count <= limit else { throw CocoaError(.fileWriteOutOfSpace) }
-        var size = UInt32(body.count).bigEndian
+        guard body.count <= limit, let length = UInt32(exactly: body.count) else {
+            throw CocoaError(.fileWriteOutOfSpace)
+        }
+        var size = length.bigEndian
         var packet = withUnsafeBytes(of: &size) { Data($0) }
         packet.append(body)
         connection.send(content: packet, completion: .contentProcessed(completion))
@@ -91,11 +93,35 @@ public enum CLISocket {
                 completion(.failure(CocoaError(.fileReadCorruptFile)))
                 return
             }
-            connection.receive(minimumIncompleteLength: size, maximumLength: size) { body, _, _, error in
+            BodyReader<T>(connection: connection, size: size, completion: completion).receiveNextChunk()
+        }
+    }
+
+    // Only one receive is outstanding at a time. Each callback runs on the connection's queue.
+    private final class BodyReader<Message: Decodable & Sendable>: @unchecked Sendable {
+        private let connection: NWConnection
+        private let size: Int
+        private let completion: @Sendable (Result<Message, any Error>) -> Void
+        private var body = Data()
+
+        init(connection: NWConnection, size: Int, completion: @escaping @Sendable (Result<Message, any Error>) -> Void) {
+            self.connection = connection
+            self.size = size
+            self.completion = completion
+        }
+
+        func receiveNextChunk() {
+            let count = min(size - body.count, 64 * 1024)
+            connection.receive(minimumIncompleteLength: count, maximumLength: count) { [self] chunk, _, _, error in
                 do {
                     if let error { throw error }
-                    guard let body, body.count == size else { throw CocoaError(.fileReadCorruptFile) }
-                    completion(.success(try JSONDecoder().decode(type, from: body)))
+                    guard let chunk, chunk.count == count else { throw CocoaError(.fileReadCorruptFile) }
+                    body.append(chunk)
+                    if body.count == size {
+                        completion(.success(try JSONDecoder().decode(Message.self, from: body)))
+                    } else {
+                        receiveNextChunk()
+                    }
                 } catch {
                     completion(.failure(error))
                 }

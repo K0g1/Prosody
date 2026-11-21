@@ -4,9 +4,17 @@ public enum SessionIndexStoreError: Error, Equatable, Sendable {
     case invalidIndex
 }
 
+// Session mutations and their index updates share one executor across
+// instances. Disk operations run on a serial queue without blocking other
+// tasks on a lock or suspending midway through a session mutation.
+@globalActor actor SessionStoreIO {
+    static let shared = SessionStoreIO()
+    private nonisolated let queue = DispatchSerialQueue(label: "com.openai.clippy.session-store")
+    nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
+}
+
 public actor SessionIndexStore {
     public let fileURL: URL
-    private static let mutationLock = NSLock()
 
     public init(rootURL: URL) {
         self.fileURL = rootURL.appendingPathComponent(AppConstants.sessionIndexFileName)
@@ -16,74 +24,70 @@ public actor SessionIndexStore {
         self.fileURL = fileURL
     }
 
-    public func load() throws -> [SessionSummary] {
-        try read()
+    public func load() async throws -> [SessionSummary] { try await read() }
+
+    public func replace(with summaries: [SessionSummary]) async throws {
+        try await replaceOnDisk(with: summaries)
     }
 
-    public func replace(with summaries: [SessionSummary]) throws {
-        try Self.withMutationLock {
-            try write(Self.sorted(summaries))
-        }
-    }
-
-    public func upsert(_ summary: SessionSummary) throws {
-        try Self.withMutationLock {
-            var summaries = try read()
-            summaries.removeAll { $0.id == summary.id }
-            summaries.append(summary)
-            try write(Self.sorted(summaries))
-        }
-    }
+    public func upsert(_ summary: SessionSummary) async throws { try await upsertOnDisk(summary) }
 
     /// Fills metadata missing from an older index without replacing entries
     /// that another store instance may have written since the scan began.
-    public func backfillMetadata(_ updates: [UUID: SessionSummary]) throws -> [SessionSummary] {
-        try Self.withMutationLock {
-            var summaries = try read()
-            guard !updates.isEmpty else { return summaries }
-            var changed = false
-            for index in summaries.indices {
-                guard let update = updates[summaries[index].id] else { continue }
-                let hadMissingSourceKind = summaries[index].sourceKind == nil
-                if summaries[index].sourceKind == nil, let sourceKind = update.sourceKind {
-                    summaries[index].sourceKind = sourceKind
-                    changed = true
-                }
-                if (summaries[index].hasRetainedAudio == nil || hadMissingSourceKind),
-                   let hasRetainedAudio = update.hasRetainedAudio {
-                    summaries[index].hasRetainedAudio = hasRetainedAudio
-                    changed = true
-                }
+    public func backfillMetadata(_ updates: [UUID: SessionSummary]) async throws -> [SessionSummary] {
+        try await backfillMetadataOnDisk(updates)
+    }
+
+    public func remove(id: UUID) async throws { try await removeFromDisk(id: id) }
+
+    @SessionStoreIO func replaceOnDisk(with summaries: [SessionSummary]) throws {
+        try write(Self.sorted(summaries))
+    }
+
+    @SessionStoreIO func upsertOnDisk(_ summary: SessionSummary) throws {
+        var summaries = try read()
+        summaries.removeAll { $0.id == summary.id }
+        summaries.append(summary)
+        try write(Self.sorted(summaries))
+    }
+
+    @SessionStoreIO func backfillMetadataOnDisk(_ updates: [UUID: SessionSummary]) throws -> [SessionSummary] {
+        var summaries = try read()
+        guard !updates.isEmpty else { return summaries }
+        var changed = false
+        for index in summaries.indices {
+            guard let update = updates[summaries[index].id] else { continue }
+            let hadMissingSourceKind = summaries[index].sourceKind == nil
+            if summaries[index].sourceKind == nil, let sourceKind = update.sourceKind {
+                summaries[index].sourceKind = sourceKind
+                changed = true
             }
-            if changed { try write(summaries) }
-            return summaries
+            if (summaries[index].hasRetainedAudio == nil || hadMissingSourceKind),
+               let hasRetainedAudio = update.hasRetainedAudio {
+                summaries[index].hasRetainedAudio = hasRetainedAudio
+                changed = true
+            }
         }
+        if changed { try write(summaries) }
+        return summaries
     }
 
-    public func remove(id: UUID) throws {
-        try Self.withMutationLock {
-            let summaries = try read().filter { $0.id != id }
-            try write(summaries)
-        }
+    @SessionStoreIO func removeFromDisk(id: UUID) throws {
+        try write(read().filter { $0.id != id })
     }
 
-    private func read() throws -> [SessionSummary] {
+    @SessionStoreIO func read() throws -> [SessionSummary] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
+        let data = try Data(contentsOf: fileURL)
         do {
-            return try AtomicFileWriter.makeDecoder().decode([SessionSummary].self, from: Data(contentsOf: fileURL))
+            return try AtomicFileWriter.makeDecoder().decode([SessionSummary].self, from: data)
         } catch {
             throw SessionIndexStoreError.invalidIndex
         }
     }
 
-    private func write(_ summaries: [SessionSummary]) throws {
+    @SessionStoreIO private func write(_ summaries: [SessionSummary]) throws {
         try AtomicFileWriter.encode(summaries, to: fileURL)
-    }
-
-    private static func withMutationLock<T>(_ operation: () throws -> T) rethrows -> T {
-        mutationLock.lock()
-        defer { mutationLock.unlock() }
-        return try operation()
     }
 
     private static func sorted(_ summaries: [SessionSummary]) -> [SessionSummary] {

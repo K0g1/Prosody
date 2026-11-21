@@ -5,36 +5,57 @@ import os
 /// One converter per source preserves the sample-rate conversion phase across
 /// packets. All conversion work and framework objects stay off the main actor.
 public actor StreamingAudioResampler {
-    private var converter: AVAudioConverter?
-    private var inputRate: Double = 0
+    private var resampler: MonoPCMResampler?
 
     public init() {}
 
     public func resample(_ samples: [Float], from rate: Double) throws -> [Float] {
         guard rate.isFinite, rate > 0, !samples.isEmpty,
-              samples.count < Int(UInt32.max), samples.allSatisfy(\.isFinite) else {
+              AVAudioFrameCount(exactly: samples.count) != nil, samples.allSatisfy(\.isFinite) else {
             throw AudioSampleConverterError.invalidSamples
         }
-        if rate == AudioSampleConverter.speechSampleRate { return samples }
-        if converter == nil || inputRate != rate {
-            guard let input = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false),
-                  let output = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: AudioSampleConverter.speechSampleRate, channels: 1, interleaved: false),
-                  let created = AVAudioConverter(from: input, to: output) else {
-                throw AudioSampleConverterError.invalidFormat
-            }
-            created.primeMethod = .none
-            converter = created
-            inputRate = rate
+        if rate == AudioSampleConverter.speechSampleRate {
+            resampler = nil
+            return samples
         }
-        guard let converter,
-              let input = AVAudioPCMBuffer(pcmFormat: converter.inputFormat, frameCapacity: AVAudioFrameCount(samples.count)),
-              let channel = input.floatChannelData?[0] else { throw AudioSampleConverterError.invalidFormat }
-        input.frameLength = AVAudioFrameCount(samples.count)
-        samples.withUnsafeBufferPointer { channel.update(from: $0.baseAddress!, count: samples.count) }
-        let capacity = ceil(Double(samples.count) * AudioSampleConverter.speechSampleRate / rate) + 32
-        guard capacity < Double(UInt32.max),
-              let output = AVAudioPCMBuffer(pcmFormat: converter.outputFormat, frameCapacity: AVAudioFrameCount(capacity)) else {
+        if let resampler, resampler.inputRate == rate {
+            return try resampler.resample(samples)
+        }
+        let next = try MonoPCMResampler(from: rate, to: AudioSampleConverter.speechSampleRate)
+        resampler = next
+        return try next.resample(samples)
+    }
+}
+
+/// A streaming converter confined to its owner's actor. Retains fractional
+/// conversion phase across packets of the same format.
+struct MonoPCMResampler {
+    private let converter: AVAudioConverter
+    let inputRate: Double
+
+    init(
+        from inputRate: Double, to outputRate: Double, primeMethod: AVAudioConverterPrimeMethod = .none
+    ) throws {
+        guard let input = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: inputRate, channels: 1, interleaved: false),
+              let output = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: outputRate, channels: 1, interleaved: false),
+              let converter = AVAudioConverter(from: input, to: output) else {
             throw AudioSampleConverterError.invalidFormat
+        }
+        converter.primeMethod = primeMethod
+        self.converter = converter
+        self.inputRate = inputRate
+    }
+
+    func resample(_ samples: [Float]) throws -> [Float] {
+        let capacity = ceil(Double(samples.count) * converter.outputFormat.sampleRate / inputRate) + 32
+        guard let inputFrames = AVAudioFrameCount(exactly: samples.count), inputFrames > 0,
+              let outputFrames = AVAudioFrameCount(exactly: capacity),
+              let output = AVAudioPCMBuffer(pcmFormat: converter.outputFormat, frameCapacity: outputFrames),
+              let input = AVAudioPCMBuffer(pcmFormat: converter.inputFormat, frameCapacity: inputFrames),
+              let channel = input.floatChannelData?[0] else { throw AudioSampleConverterError.invalidFormat }
+        input.frameLength = inputFrames
+        samples.withUnsafeBufferPointer { source in
+            if let address = source.baseAddress { channel.update(from: address, count: source.count) }
         }
         let supplied = OSAllocatedUnfairLock(initialState: false)
         var error: NSError?
@@ -51,5 +72,27 @@ public actor StreamingAudioResampler {
         }
         guard let data = output.floatChannelData?[0] else { return [] }
         return Array(UnsafeBufferPointer(start: data, count: Int(output.frameLength)))
+    }
+
+    func finish() throws -> [Float] {
+        guard let output = AVAudioPCMBuffer(pcmFormat: converter.outputFormat, frameCapacity: 4_096),
+              let data = output.floatChannelData?[0]
+        else { throw AudioSampleConverterError.invalidFormat }
+
+        var tail: [Float] = []
+        while true {
+            var error: NSError?
+            let status = converter.convert(to: output, error: &error) { _, inputStatus in
+                inputStatus.pointee = .endOfStream
+                return nil
+            }
+            tail.append(contentsOf: UnsafeBufferPointer(start: data, count: Int(output.frameLength)))
+            if status == .endOfStream { return tail }
+            guard status == .haveData, output.frameLength > 0 else {
+                throw AudioSampleConverterError.conversionFailed(
+                    error?.localizedDescription ?? "Could not drain the audio converter."
+                )
+            }
+        }
     }
 }

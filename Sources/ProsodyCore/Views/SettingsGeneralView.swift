@@ -129,13 +129,17 @@ struct GeneralSettingsView: GroupedSettingsSearchPage {
         self.model = model
         self.preferences = model.preferences
         self.updates = model.softwareUpdates
+        _loginItems = StateObject(wrappedValue: Self.makeLoginItems(model: model))
+    }
+
+    private static func makeLoginItems(model: AppModel) -> LoginItemManager {
         let loginItems = model.demoMode
             ? LoginItemManager(backend: FixtureLoginItemBackend())
             : LoginItemManager.live
         loginItems.onSuccessfulUserInitiatedChange = { [weak preferences = model.preferences] enabled in
             preferences?.launchAtLogin = enabled
         }
-        _loginItems = StateObject(wrappedValue: loginItems)
+        return loginItems
     }
 
     var body: some View {

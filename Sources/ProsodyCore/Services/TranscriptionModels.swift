@@ -154,36 +154,30 @@ public struct TranscriptAccumulator: Sendable {
     }
 
     private mutating func upsert(_ incoming: TranscriptSegment, isFinal: Bool) {
-        let exactMatches = segments.indices.filter { segments[$0].id == incoming.id }
-        for index in exactMatches.reversed() {
-            segments.remove(at: index)
-        }
+        let exactMatch = segments.first { $0.id == incoming.id }
+        if !isFinal, exactMatch?.isFinal == true { return }
 
-        if isFinal {
-            let provisionalMatches = segments.indices.filter { index in
-                let existing = segments[index]
-                return !existing.isFinal && existing.source == incoming.source && overlapsOrNear(existing, incoming)
-            }
-            for index in provisionalMatches.reversed() {
-                segments.remove(at: index)
-            }
-        } else if let replacement = segments.indices
-            .filter({ index in
-                let existing = segments[index]
-                return !existing.isFinal && existing.source == incoming.source && overlapsOrNear(existing, incoming)
-            })
-            .max(by: { segments[$0].start < segments[$1].start }) {
-            segments.remove(at: replacement)
+        let tolerance = provisionalReplacementTolerance
+        segments.removeAll { existing in
+            if existing.id == incoming.id { return true }
+            guard !existing.isFinal, existing.source == incoming.source else { return false }
+            if !isFinal { return true }
+            // The decoder normally finalizes the same ID. If a different
+            // ID is used, an older final must not remove a newer live tail.
+            guard exactMatch == nil, incoming.end >= existing.end else { return false }
+            return Self.overlapsOrNear(existing, incoming, tolerance: tolerance)
         }
 
         segments.append(applyDefaultSpeaker(to: incoming))
     }
 
-    private func overlapsOrNear(_ lhs: TranscriptSegment, _ rhs: TranscriptSegment) -> Bool {
+    private static func overlapsOrNear(
+        _ lhs: TranscriptSegment, _ rhs: TranscriptSegment, tolerance: TimeInterval
+    ) -> Bool {
         let overlap = min(lhs.end, rhs.end) - max(lhs.start, rhs.start)
         if overlap >= 0 { return true }
-        return abs(lhs.start - rhs.start) <= provisionalReplacementTolerance
-            || abs(lhs.end - rhs.end) <= provisionalReplacementTolerance
+        return abs(lhs.start - rhs.start) <= tolerance
+            || abs(lhs.end - rhs.end) <= tolerance
     }
 
     private func applyDefaultSpeaker(to segment: TranscriptSegment) -> TranscriptSegment {

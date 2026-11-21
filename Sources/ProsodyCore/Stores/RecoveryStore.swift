@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum RecoveryState: String, Codable, Equatable, Sendable {
@@ -115,11 +116,17 @@ public actor RecoveryStore {
 
     public func checkpoint(segment: TranscriptSegment, to id: UUID) throws {
         let directory = directoryURL(for: id)
-        guard FileManager.default.fileExists(atPath: directory.appendingPathComponent(AppConstants.recoveryManifestFileName).path) else {
+        let manifestURL = directory.appendingPathComponent(AppConstants.recoveryManifestFileName)
+        guard FileManager.default.fileExists(atPath: manifestURL.path) else {
             throw RecoveryStoreError.notFound
         }
+        var manifest = try decodeManifest(at: manifestURL)
+        guard manifest.state != .completed else { return }
         try AtomicFileWriter.encode(segment, to: directory.appendingPathComponent("tail-\(segment.source.rawValue).json"))
-        try updateState(id: id, state: .recording, duration: segment.end)
+        manifest.duration = max(manifest.duration, segment.end)
+        manifest.session.duration = manifest.duration
+        manifest.updatedAt = .now
+        try AtomicFileWriter.encode(manifest, to: manifestURL)
     }
 
     public func append(segment: TranscriptSegment, to id: UUID) throws -> RecoveryManifest {
@@ -139,14 +146,21 @@ public actor RecoveryStore {
         var line = try lineEncoder.encode(segment)
         line.append(0x0A)
         let transcriptURL = directory.appendingPathComponent(AppConstants.recoveryTranscriptFileName)
-        if !FileManager.default.fileExists(atPath: transcriptURL.path) {
-            try AtomicFileWriter.write(Data(), to: transcriptURL)
+        let fileFD = open(transcriptURL.path, O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fileFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let handle = FileHandle(fileDescriptor: fileFD, closeOnDealloc: true)
+        let end = try handle.seekToEnd()
+        if end > 0 {
+            // Delimit an unterminated record before appending. A complete
+            // record missing only its LF stays recoverable.
+            try handle.seek(toOffset: end - 1)
+            if try handle.read(upToCount: 1)?.first != 0x0A {
+                line.insert(0x0A, at: line.startIndex)
+            }
         }
-        let handle = try FileHandle(forWritingTo: transcriptURL)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
         try handle.write(contentsOf: line)
         try handle.synchronize()
+        try handle.close()
         manifest.transcriptSegmentCount += 1
         manifest.duration = max(manifest.duration, segment.end)
         manifest.session.duration = max(manifest.session.duration, segment.end)
@@ -167,11 +181,11 @@ public actor RecoveryStore {
         let data = (try? Data(contentsOf: transcriptURL)) ?? Data()
 
         let decoder = AtomicFileWriter.makeDecoder()
-        let lines = String(decoding: data, as: UTF8.self).split(whereSeparator: { $0.isNewline })
+        let lines = data.split(separator: 0x0A)
         var segments: [TranscriptSegment] = []
         var ignoredLines = 0
         for line in lines {
-            guard let segment = try? decoder.decode(TranscriptSegment.self, from: Data(line.utf8)) else {
+            guard let segment = try? decoder.decode(TranscriptSegment.self, from: Data(line)) else {
                 ignoredLines += 1
                 continue
             }

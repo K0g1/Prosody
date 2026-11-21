@@ -1,6 +1,8 @@
+#if canImport(Testing)
 @preconcurrency import AVFoundation
 import AppKit
 import Foundation
+import ProsodyIPC
 import Testing
 @testable import ProsodyCore
 
@@ -77,6 +79,16 @@ struct Beta3WorkflowTests {
         let replacement = try await Self.invokeCLI(cli, ["replacements", "set", "meeting notes", "meeting minutes"])
         #expect(replacement.status == 0)
         #expect(preferences.wordReplacements.first?.replacement == "meeting minutes")
+        let listed = try await Self.invokeCLI(cli, ["replacements", "--json", "list"])
+        try #require(listed.status == 0, Comment(rawValue: listed.output))
+        let listResponse = try JSONDecoder().decode(CLIResponse.self, from: Data(listed.output.utf8))
+        #expect(listResponse.items.contains { $0.input == "meeting notes" && $0.text == "meeting minutes" })
+
+        let literal = try await Self.invokeCLI(cli, ["replacements", "set", "--json", "", "--json"])
+        try #require(literal.status == 0, Comment(rawValue: literal.output))
+        _ = try JSONDecoder().decode(CLIResponse.self, from: Data(literal.output.utf8))
+        #expect(preferences.wordReplacements.contains { $0.original == "--json" && $0.replacement.isEmpty })
+
         let result = try await Self.invokeCLI(cli, ["transcribe", "--output-dir", root.path, "--include", "audio-name", file])
         try #require(result.status == 0, Comment(rawValue: result.output))
         let outputURL = URL(fileURLWithPath: result.output.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -231,3 +243,4 @@ struct Beta3WorkflowTests {
         #expect(try String(contentsOf: transcript, encoding: .utf8) == "Transcript")
     }
 }
+#endif

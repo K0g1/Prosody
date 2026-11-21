@@ -13,8 +13,11 @@ extension ProsodyValidation {
         for bitRate in [96_000, 192_000] {
             let writer = AudioArchiveWriter(
                 directoryURL: root.appendingPathComponent("\(bitRate)"), bitRate: bitRate)
-            let rates = [24_000.0, 8_000, 16_000, 44_100, 48_000]
-            for rate in rates {
+            let formats: [(inputRate: Double, archiveRate: Double)] = [
+                (24_000, 24_000), (8_000, 8_000), (16_000, 16_000), (44_100, 44_100),
+                (48_000, 48_000), (88_200, 48_000), (96_000, 48_000)
+            ]
+            for (rate, _) in formats {
                 for packetIndex in 0..<10 {
                     let samples = (0..<Int(rate / 10)).map {
                         Float(sin(Double($0) * 2 * .pi * 440 / rate) * 0.2)
@@ -31,12 +34,12 @@ extension ProsodyValidation {
             let microphoneURLs = urls.filter {
                 $0.deletingLastPathComponent().lastPathComponent == "microphone"
             }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-            precondition(urls.count == rates.count + 1 && microphoneURLs.count == rates.count)
-            for (url, rate) in zip(microphoneURLs, rates) {
+            precondition(urls.count == formats.count + 1 && microphoneURLs.count == formats.count)
+            for (url, format) in zip(microphoneURLs, formats) {
                 let file = try AVAudioFile(forReading: url)
-                precondition(file.processingFormat.sampleRate == rate)
-                precondition(abs(Double(file.length) / rate - 1) < 0.15,
-                             "Microphone archive lost duration at \(rate) Hz / \(bitRate) bps")
+                precondition(file.processingFormat.sampleRate == format.archiveRate)
+                precondition(abs(Double(file.length) / format.archiveRate - 1) < 0.15,
+                             "Microphone archive lost duration at \(format.inputRate) Hz / \(bitRate) bps")
                 let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
                     frameCapacity: AVAudioFrameCount(file.length))!
                 try file.read(into: buffer)
@@ -46,6 +49,6 @@ extension ProsodyValidation {
                              "Microphone archive did not decode audible PCM")
             }
         }
-        print("Microphone archive: PASS (8–48 kHz, both quality settings, mixed sources, rate changes, AAC decoding)")
+        print("Microphone archive: PASS (8–96 kHz input, both quality settings, mixed sources, rate changes, AAC decoding)")
     }
 }

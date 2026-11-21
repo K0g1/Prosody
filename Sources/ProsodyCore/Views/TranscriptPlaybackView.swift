@@ -99,11 +99,41 @@ final class TranscriptFollowController: ObservableObject {
     }
 
     func suspend() {
+        resetPendingUpdates()
+        state.reset()
+        if directive != nil { directive = nil }
+    }
+
+    func updateFromPlayback(
+        time: TimeInterval,
+        timeline: TranscriptTimeline,
+        autoFollow: Bool,
+        isPlaying: Bool,
+        isScrubbing: Bool,
+        isSearchActive: Bool
+    ) {
+        guard TranscriptFollowPolicy.shouldFollow(
+            autoFollow: autoFollow,
+            isScrubbing: isScrubbing,
+            isSearchActive: isSearchActive
+        ) else { return }
+        update(
+            time: TranscriptFollowPolicy.rowTime(time, playing: isPlaying, scrubbing: isScrubbing),
+            timeline: timeline,
+            allowsAnimation: isPlaying && !isScrubbing
+        )
+    }
+
+    func finishScrub(at time: TimeInterval, timeline: TranscriptTimeline) {
+        resetPendingUpdates()
+        state.reset()
+        directive = state.update(time: time, timeline: timeline, allowsAnimation: false)
+    }
+
+    private func resetPendingUpdates() {
         flushTask?.cancel()
         flushTask = nil
         coalescer.reset()
-        state.reset()
-        if directive != nil { directive = nil }
     }
 
     private func scheduleFlush(after delay: Duration) {
@@ -177,14 +207,6 @@ struct TranscriptAudioClockObserver: View {
     let isSearchActive: Bool
     let controller: TranscriptFollowController
 
-    private var shouldFollow: Bool {
-        TranscriptFollowPolicy.shouldFollow(
-            autoFollow: autoFollow,
-            isScrubbing: player.isScrubbing,
-            isSearchActive: isSearchActive
-        )
-    }
-
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
@@ -194,35 +216,35 @@ struct TranscriptAudioClockObserver: View {
                 if !player.isPlaying { synchronize() }
             }
             .onChange(of: player.isPlaying) { _, _ in synchronize() }
-            .onChange(of: player.scrubEndRequest) { _, _ in
-                // SwiftUI can coalesce the final drag sample with commit.
-                // Keep the last thumb row even when auto-follow is off.
-                guard !isSearchActive else { return }
-                controller.update(
-                    time: player.currentTime,
-                    timeline: timeline,
-                    allowsAnimation: false,
-                    minimumInterval: .milliseconds(33)
-                )
+            .onReceive(player.scrubCompletionPublisher) { completion in
+                switch completion {
+                case .committed(let time):
+                    if !isSearchActive { controller.finishScrub(at: time, timeline: timeline) }
+                case .cancelled:
+                    resetFollow()
+                }
             }
-            .onChange(of: timeline) { _, _ in synchronize() }
-            .onChange(of: autoFollow) { _, _ in synchronize() }
-            .onChange(of: isSearchActive) { _, _ in synchronize() }
+            .onChange(of: timeline) { _, _ in resetFollow() }
+            .onChange(of: autoFollow) { _, _ in resetFollow() }
+            .onChange(of: isSearchActive) { _, _ in resetFollow() }
     }
 
     private func synchronize(_ measuredTime: TimeInterval? = nil) {
-        if shouldFollow {
-            let playing = player.isPlaying
-            let scrubbing = player.isScrubbing
-            let time = measuredTime ?? (playing ? player.measuredPlaybackTime : nil) ?? player.currentTime
-            controller.update(
-                time: TranscriptFollowPolicy.rowTime(time, playing: playing, scrubbing: scrubbing),
-                timeline: timeline,
-                allowsAnimation: playing && !scrubbing
-            )
-        } else if controller.directive != nil {
-            controller.suspend()
-        }
+        let playing = player.isPlaying
+        let time = measuredTime ?? (playing ? player.measuredPlaybackTime : nil) ?? player.currentTime
+        controller.updateFromPlayback(
+            time: time,
+            timeline: timeline,
+            autoFollow: autoFollow,
+            isPlaying: playing,
+            isScrubbing: player.isScrubbing,
+            isSearchActive: isSearchActive
+        )
+    }
+
+    private func resetFollow() {
+        controller.suspend()
+        synchronize()
     }
 }
 
@@ -267,8 +289,9 @@ struct TranscriptPlaybackTransport: View {
                 currentTime: player.currentTime,
                 density: timeline.density,
                 onScrubBegan: player.beginScrubbing,
-                onScrubChanged: player.previewSeek,
-                onScrubEnded: player.commitScrub,
+                onScrubChanged: { if player.isScrubbing { player.previewSeek(to: $0) } },
+                onScrubEnded: { if player.isScrubbing { player.commitScrub(to: $0) } },
+                onScrubCancelled: player.cancelScrub,
                 onStep: player.stepSeek
             )
 
@@ -335,23 +358,23 @@ struct TranscriptPlaybackTransport: View {
 
 struct TranscriptTimelineBar: View {
     @Environment(\.prosodyPalette) private var palette
+    @Environment(\.isEnabled) private var isEnabled
     let duration: TimeInterval
     let currentTime: TimeInterval
     let density: TranscriptTimelineDensity
     let onScrubBegan: () -> Void
     let onScrubChanged: (TimeInterval) -> Void
     let onScrubEnded: (TimeInterval) -> Void
+    let onScrubCancelled: () -> Void
     let onStep: (TimeInterval) -> Void
 
-    @State private var isDragging = false
-    @State private var dragTime: TimeInterval?
-
-    private var displayedTime: TimeInterval { dragTime ?? currentTime }
+    @GestureState private var isGestureActive = false
+    @State private var dragID: UUID?
 
     var body: some View {
         GeometryReader { geometry in
             let fraction = duration > 0
-                ? min(max(displayedTime / duration, 0), 1)
+                ? min(max(currentTime / duration, 0), 1)
                 : 0
             let progressX = geometry.size.width * fraction
             ZStack(alignment: .leading) {
@@ -374,26 +397,35 @@ struct TranscriptTimelineBar: View {
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
+                    .updating($isGestureActive) { _, active, _ in active = true }
                     .onChanged { value in
-                        guard duration > 0, geometry.size.width > 0 else { return }
-                        if !isDragging {
-                            isDragging = true
+                        guard isEnabled, duration > 0, geometry.size.width > 0 else { return }
+                        if dragID == nil {
+                            dragID = UUID()
                             onScrubBegan()
                         }
-                        let time = time(at: value.location.x, width: geometry.size.width)
-                        dragTime = time
-                        onScrubChanged(time)
+                        onScrubChanged(time(at: value.location.x, width: geometry.size.width))
                     }
                     .onEnded { value in
-                        guard duration > 0, geometry.size.width > 0 else { return }
-                        let time = time(at: value.location.x, width: geometry.size.width)
-                        dragTime = nil
-                        isDragging = false
-                        onScrubEnded(time)
+                        guard dragID != nil else { return }
+                        guard isEnabled, duration > 0, geometry.size.width > 0 else {
+                            cancelDrag()
+                            return
+                        }
+                        dragID = nil
+                        onScrubEnded(time(at: value.location.x, width: geometry.size.width))
                     }
             )
         }
         .frame(height: 30)
+        .onChange(of: isGestureActive) { _, active in
+            guard !active, let endingDrag = dragID else { return }
+            // Give a successful gesture's onEnded callback the current turn.
+            Task { @MainActor in
+                if dragID == endingDrag { cancelDrag() }
+            }
+        }
+        .onDisappear { cancelDrag() }
         .focusable()
         .onKeyPress(.leftArrow) {
             onStep(-5)
@@ -405,7 +437,7 @@ struct TranscriptTimelineBar: View {
         }
         .accessibilityElement()
         .accessibilityLabel("Transcript audio timeline")
-        .accessibilityValue("\(ProsodyFormatters.timestamp(displayedTime)) of \(ProsodyFormatters.duration(duration))")
+        .accessibilityValue("\(ProsodyFormatters.timestamp(currentTime)) of \(ProsodyFormatters.duration(duration))")
         .accessibilityAdjustableAction { direction in
             switch direction {
             case .increment: onStep(5)
@@ -418,6 +450,12 @@ struct TranscriptTimelineBar: View {
 
     private func time(at x: CGFloat, width: CGFloat) -> TimeInterval {
         min(max(0, Double(x / width) * duration), duration)
+    }
+
+    private func cancelDrag() {
+        guard dragID != nil else { return }
+        dragID = nil
+        onScrubCancelled()
     }
 }
 

@@ -50,18 +50,37 @@ struct ProsodyCLI {
     private static func parse(_ command: CLIRequest.Command, arguments: [String]) throws -> (CLIRequest, Bool) {
         var request = CLIRequest(command: command)
         if command == .replacements {
-            var parts = arguments
-            let json = parts.last == "--json"
-            if json { parts.removeLast() }
+            var parts = arguments[...]
+            var json = false
+            while parts.first == "--json" {
+                parts.removeFirst()
+                json = true
+            }
             if parts.isEmpty { return (request, json) }
-            guard let operation = CLIRequest.ReplacementOperation(rawValue: parts[0]) else {
+            guard let operation = CLIRequest.ReplacementOperation(rawValue: parts.removeFirst()) else {
                 throw UsageError("Use replacements list, set, or remove.")
             }
-            let count = operation == .set ? 3 : operation == .remove ? 2 : 1
-            guard parts.count == count else { throw UsageError("Pass ORIGINAL and REPLACEMENT to set, or ORIGINAL to remove.") }
+            let operandCount: Int
+            switch operation {
+            case .list: operandCount = 0
+            case .set: operandCount = 2
+            case .remove: operandCount = 1
+            }
+            // Keep the existing trailing flag precedence when an operand is literally "--json".
+            if parts.last == "--json" {
+                parts.removeLast()
+                json = true
+            }
+            while parts.count > operandCount, parts.first == "--json" {
+                parts.removeFirst()
+                json = true
+            }
+            guard parts.count == operandCount else {
+                throw UsageError("Pass ORIGINAL and REPLACEMENT to set, or ORIGINAL to remove.")
+            }
             request.replacementOperation = operation
-            if count >= 2 { request.originalWord = parts[1] }
-            if count == 3 { request.replacementWord = parts[2] }
+            if !parts.isEmpty { request.originalWord = parts.removeFirst() }
+            request.replacementWord = parts.first
             return (request, json)
         }
         var json = false
@@ -167,9 +186,9 @@ struct ProsodyCLI {
     Usage
       prosody status [--json]
       prosody labels [--json]
-      prosody replacements list [--json]
-      prosody replacements set ORIGINAL REPLACEMENT [--json]
-      prosody replacements remove ORIGINAL [--json]
+      prosody replacements [--json] list [--json]
+      prosody replacements [--json] set ORIGINAL REPLACEMENT [--json]
+      prosody replacements [--json] remove ORIGINAL [--json]
       prosody transcribe [options] <audio-file> [...]
 
     Options

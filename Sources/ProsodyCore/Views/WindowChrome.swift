@@ -30,8 +30,15 @@ extension WindowChromeLayout {
     }
 }
 
+private struct WindowChromeLayoutKey: EnvironmentKey {
+    static let defaultValue = WindowChromeLayout.none
+}
+
 extension EnvironmentValues {
-    @Entry var windowChromeLayout = WindowChromeLayout.none
+    var windowChromeLayout: WindowChromeLayout {
+        get { self[WindowChromeLayoutKey.self] }
+        set { self[WindowChromeLayoutKey.self] = newValue }
+    }
 }
 
 /// This row belongs inside the sidebar background, at the top of the window.

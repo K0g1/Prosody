@@ -1,3 +1,4 @@
+#if canImport(XCTest)
 import Foundation
 import XCTest
 @testable import ProsodyCore
@@ -321,3 +322,4 @@ final class TranscriptLibraryTests: XCTestCase {
         return session
     }
 }
+#endif

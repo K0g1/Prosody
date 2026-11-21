@@ -35,7 +35,7 @@ Use a consistent local Apple Development identity for development. Public releas
 
 ## Demo mode and testing
 
-Run `./script/test.sh` with Xcode selected. It combines the Swift package tests and standalone service checks and does not require installed models. The executable is `ProsodyValidation`. See the [release validation guide](release-validation.md).
+Select Xcode and run `./script/test.sh` for the full Swift package suite and the standalone `ProsodyValidation` service checks. With standalone Command Line Tools selected, SwiftPM skips test files whose XCTest or Swift Testing framework is unavailable and may report zero package tests. The script still runs `ProsodyValidation` after a successful `swift test`. Neither step requires installed models. See the [release validation guide](release-validation.md).
 
 For changes that affect inference, run the local dictation benchmark with the installed Parakeet model. Capture, insertion, and window behavior also need native checks; use the [release validation guide](release-validation.md). A passing package test is not evidence that a physical microphone, a real shortcut, or a native editor accepted the change.
 

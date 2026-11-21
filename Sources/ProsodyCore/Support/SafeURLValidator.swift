@@ -1,12 +1,23 @@
 import Foundation
 
-public enum SafeURLValidationError: Error, Equatable, Sendable {
+public enum SafeURLValidationError: LocalizedError, Equatable, Sendable {
     case malformed
     case unsupportedScheme(String)
     case missingHost
     case credentialsNotAllowed
     case insecureRemoteHTTP
     case remoteAccessDisabled
+
+    public var errorDescription: String? {
+        switch self {
+        case .malformed: "Enter a valid notes server URL."
+        case .unsupportedScheme: "The notes server URL must use HTTP or HTTPS."
+        case .missingHost: "The notes server URL must include a host."
+        case .credentialsNotAllowed: "Remove credentials from the notes server URL and use the API key field."
+        case .insecureRemoteHTTP: "Remote notes servers must use HTTPS."
+        case .remoteAccessDisabled: "Local-only mode blocks remote notes requests."
+        }
+    }
 }
 
 public struct SafeURLPolicy: Sendable, Equatable {

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum AtomicFileWriterError: Error, Equatable, Sendable {
@@ -9,25 +10,47 @@ public enum AtomicFileWriterError: Error, Equatable, Sendable {
 public enum AtomicFileWriter {
     @discardableResult
     public static func write(_ data: Data, to url: URL) throws -> URL {
-        let fileManager = FileManager.default
         let directory = url.deletingLastPathComponent()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let directoryFD = open(directory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard directoryFD >= 0 else { throw posixError() }
+        defer { _ = close(directoryFD) }
 
-        let temporaryURL = directory.appendingPathComponent(
-            ".\(url.lastPathComponent).\(UUID().uuidString).tmp"
+        let temporaryName = ".prosody-\(UUID().uuidString).tmp"
+        let fileFD = openat(
+            directoryFD, temporaryName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600
         )
-        defer { try? fileManager.removeItem(at: temporaryURL) }
+        guard fileFD >= 0 else { throw posixError() }
+        var renamed = false
+        defer {
+            if !renamed { _ = unlinkat(directoryFD, temporaryName, 0) }
+        }
 
-        try data.write(to: temporaryURL, options: [.atomic])
+        let file = FileHandle(fileDescriptor: fileFD, closeOnDealloc: true)
+        try file.write(contentsOf: data)
+        if fcntl(fileFD, F_FULLFSYNC) == -1 {
+            let error = posixError()
+            // Some file systems only support the standard sync operation.
+            guard error.code == .EINVAL || error.code == .ENOTSUP || error.code == .ENOTTY else { throw error }
+            guard fsync(fileFD) == 0 else { throw posixError() }
+        }
+        try file.close()
 
-        if fileManager.fileExists(atPath: url.path) {
-            guard try fileManager.replaceItemAt(url, withItemAt: temporaryURL) != nil else {
-                throw AtomicFileWriterError.replacementFailed
-            }
-        } else {
-            try fileManager.moveItem(at: temporaryURL, to: url)
+        guard renameat(directoryFD, temporaryName, directoryFD, url.lastPathComponent) == 0 else {
+            throw posixError()
+        }
+        renamed = true
+        if fsync(directoryFD) == -1 {
+            let error = posixError()
+            // The rename has already published the file. A directory sync
+            // error can mean the rename may not survive a power loss.
+            guard error.code == .EINVAL || error.code == .ENOTSUP else { throw error }
         }
         return url
+    }
+
+    private static func posixError() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 
     public static func encode<T: Encodable>(

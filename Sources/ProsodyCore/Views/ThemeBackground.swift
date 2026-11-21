@@ -124,9 +124,24 @@ struct ThemeBackground: View {
     }
 }
 
+private struct UsesWindowMaterialKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private struct UsesMonochromeControlsKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
-    @Entry var usesWindowMaterial = false
-    @Entry var usesMonochromeControls = false
+    var usesWindowMaterial: Bool {
+        get { self[UsesWindowMaterialKey.self] }
+        set { self[UsesWindowMaterialKey.self] = newValue }
+    }
+
+    var usesMonochromeControls: Bool {
+        get { self[UsesMonochromeControlsKey.self] }
+        set { self[UsesMonochromeControlsKey.self] = newValue }
+    }
 }
 
 enum ThemeBackdrop {

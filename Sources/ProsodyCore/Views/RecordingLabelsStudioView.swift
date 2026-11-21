@@ -469,14 +469,14 @@ struct RecordingLabelsStudioView: View {
     private var isDirty: Bool {
         guard let id = labelDrafts.selectedID, let draft = labelDrafts.drafts[id] else { return false }
         if labelDrafts.newLabelIDs.contains(id) { return true }
-        if labelDrafts.bookmarks[id] != nil { return true }
+        if labelDrafts.bookmarks[id] != nil || labelDrafts.transcriptBookmarks[id] != nil { return true }
         return preferences.recordingLabels.first { $0.id == id } != draft
     }
 
     private func hasUnsavedChanges(for label: RecordingLabel) -> Bool {
         if labelDrafts.newLabelIDs.contains(label.id) { return true }
         guard let draft = labelDrafts.drafts[label.id] else { return false }
-        if labelDrafts.bookmarks[label.id] != nil { return true }
+        if labelDrafts.bookmarks[label.id] != nil || labelDrafts.transcriptBookmarks[label.id] != nil { return true }
         return preferences.recordingLabels.first { $0.id == label.id } != draft
     }
 
@@ -554,6 +554,7 @@ struct RecordingLabelsStudioView: View {
         let validIDs = persistedIDs.union(labelDrafts.newLabelIDs)
         labelDrafts.drafts = labelDrafts.drafts.filter { validIDs.contains($0.key) }
         labelDrafts.bookmarks = labelDrafts.bookmarks.filter { validIDs.contains($0.key) }
+        labelDrafts.transcriptBookmarks = labelDrafts.transcriptBookmarks.filter { validIDs.contains($0.key) }
         labelDrafts.newLabelOrder.removeAll { !labelDrafts.newLabelIDs.contains($0) }
         if let selectedID = labelDrafts.selectedID, !validIDs.contains(selectedID) {
             labelDrafts.selectedID = labels.first?.id
@@ -641,7 +642,10 @@ struct RecordingLabelsStudioView: View {
                 Button("Choose Folder…") { chooseFolder(forTranscript: true) }
                     .help("Choose where to save a transcript-only copy")
                 if draft.transcriptCopy != nil {
-                    Button("Remove") { updateSelectedDraft { $0.transcriptCopy = nil } }
+                    Button("Remove") {
+                        updateSelectedDraft { $0.transcriptCopy = nil }
+                        if let id = labelDrafts.selectedID { labelDrafts.transcriptBookmarks[id] = nil }
+                    }
                         .help("Stop saving separate transcript copies for this label")
                 }
             }

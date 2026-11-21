@@ -1,4 +1,5 @@
 #if canImport(XCTest)
+import AVFoundation
 import Foundation
 import XCTest
 @testable import ProsodyCore
@@ -33,9 +34,9 @@ final class RecoveryArchiveTests: XCTestCase {
         let recoveryAudio = root.appendingPathComponent("Recovery/audio", isDirectory: true)
         let finalAudio = root.appendingPathComponent("Final/audio", isDirectory: true)
         let finalChunk = finalAudio.appendingPathComponent("system/000001.m4a")
-        try write(Data("same".utf8), to: finalChunk)
-        try write(Data("same".utf8), to: recoveryAudio.appendingPathComponent("system/000001.m4a"))
-        try write(Data("new".utf8), to: recoveryAudio.appendingPathComponent("system/000002.m4a"))
+        let retained = try writeAudioChunk(to: finalChunk, amplitude: 0.1)
+        try write(retained, to: recoveryAudio.appendingPathComponent("system/000001.m4a"))
+        let added = try writeAudioChunk(to: recoveryAudio.appendingPathComponent("system/000002.m4a"), amplitude: 0.2)
         try write(Data(), to: recoveryAudio.appendingPathComponent("system/000003.m4a"))
         try write(Data("not audio".utf8), to: recoveryAudio.appendingPathComponent("system/000004.txt"))
 
@@ -44,10 +45,10 @@ final class RecoveryArchiveTests: XCTestCase {
         let moved = try AudioArchiveMerger.merge(recoveryFiles, from: recoveryAudio, into: finalAudio)
 
         XCTAssertEqual(moved.map(\.lastPathComponent), ["000002.m4a"])
-        XCTAssertEqual(try Data(contentsOf: finalChunk), Data("same".utf8))
+        XCTAssertEqual(try Data(contentsOf: finalChunk), retained)
         XCTAssertEqual(
             try Data(contentsOf: finalAudio.appendingPathComponent("system/000002.m4a")),
-            Data("new".utf8)
+            added
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: finalAudio.appendingPathComponent("system/000003.m4a").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: finalAudio.appendingPathComponent("system/000004.txt").path))
@@ -60,10 +61,12 @@ final class RecoveryArchiveTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let recoveryAudio = root.appendingPathComponent("Recovery/audio", isDirectory: true)
         let finalAudio = root.appendingPathComponent("Final/audio", isDirectory: true)
-        let finalChunk = finalAudio.appendingPathComponent("system/000001.m4a")
-        let recoveryChunk = recoveryAudio.appendingPathComponent("system/000001.m4a")
-        try write(Data("final".utf8), to: finalChunk)
-        try write(Data("other".utf8), to: recoveryChunk)
+        let finalChunk = finalAudio.appendingPathComponent("system/000002.m4a")
+        let recoveryChunk = recoveryAudio.appendingPathComponent("system/000002.m4a")
+        let earlierChunk = recoveryAudio.appendingPathComponent("system/000001.m4a")
+        let earlier = try writeAudioChunk(to: earlierChunk)
+        let retained = try writeAudioChunk(to: finalChunk, amplitude: 0.1)
+        let conflicting = try writeAudioChunk(to: recoveryChunk, amplitude: 0.2)
 
         let recoveryFiles = try AudioArchiveMerger.recoveryAudioFiles(in: recoveryAudio)
         XCTAssertThrowsError(try AudioArchiveMerger.merge(recoveryFiles, from: recoveryAudio, into: finalAudio)) { error in
@@ -73,8 +76,10 @@ final class RecoveryArchiveTests: XCTestCase {
             }
         }
 
-        XCTAssertEqual(try Data(contentsOf: finalChunk), Data("final".utf8))
-        XCTAssertEqual(try Data(contentsOf: recoveryChunk), Data("other".utf8))
+        XCTAssertEqual(try Data(contentsOf: finalChunk), retained)
+        XCTAssertEqual(try Data(contentsOf: recoveryChunk), conflicting)
+        XCTAssertEqual(try Data(contentsOf: earlierChunk), earlier)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: finalAudio.appendingPathComponent("system/000001.m4a").path))
     }
 
     func testRecoveryAudioScopeIncludesOnlyLegacyCAFAndKnownSourceDirectories() throws {
@@ -83,11 +88,11 @@ final class RecoveryArchiveTests: XCTestCase {
         let recoveryAudio = root.appendingPathComponent("Recovery/audio", isDirectory: true)
         let finalSession = root.appendingPathComponent("Final", isDirectory: true)
         let finalAudio = finalSession.appendingPathComponent("audio", isDirectory: true)
-        try write(Data("legacy".utf8), to: recoveryAudio.appendingPathComponent("system.caf"))
-        try write(Data("system".utf8), to: recoveryAudio.appendingPathComponent("system/000001.m4a"))
-        try write(Data("microphone".utf8), to: recoveryAudio.appendingPathComponent("microphone/000001.m4a"))
-        try write(Data("ignored".utf8), to: recoveryAudio.appendingPathComponent("root.m4a"))
-        try write(Data("ignored".utf8), to: recoveryAudio.appendingPathComponent("unknown/000001.m4a"))
+        try writeAudioChunk(to: recoveryAudio.appendingPathComponent("system.caf"))
+        try writeAudioChunk(to: recoveryAudio.appendingPathComponent("system/000001.m4a"))
+        try writeAudioChunk(to: recoveryAudio.appendingPathComponent("microphone/000001.m4a"))
+        try writeAudioChunk(to: recoveryAudio.appendingPathComponent("root.m4a"))
+        try writeAudioChunk(to: recoveryAudio.appendingPathComponent("unknown/000001.m4a"))
 
         let recoveryFiles = try AudioArchiveMerger.recoveryAudioFiles(in: recoveryAudio)
         let relativePaths = Set(recoveryFiles.map {
@@ -102,6 +107,69 @@ final class RecoveryArchiveTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: finalAudio.appendingPathComponent("microphone/000001.m4a").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: finalAudio.appendingPathComponent("root.m4a").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: finalAudio.appendingPathComponent("unknown/000001.m4a").path))
+    }
+
+    func testRecoverySkipsUnfinalizedM4ATailAndRetainsPlayablePrefix() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recoveryAudio = root.appendingPathComponent("Recovery/audio", isDirectory: true)
+        let finalSession = root.appendingPathComponent("Final", isDirectory: true)
+        let good = recoveryAudio.appendingPathComponent("system/000001.m4a")
+        let tail = recoveryAudio.appendingPathComponent("system/000002.m4a")
+        try writeAudioChunk(to: good)
+
+        // Nonempty M4A with an mdat atom but no moov atom, as when a
+        // process is killed before the encoder finalizes its current chunk.
+        let unfinalized = Data([
+            0, 0, 0, 20, 0x66, 0x74, 0x79, 0x70, 0x4D, 0x34, 0x41, 0x20,
+            0, 0, 0, 0, 0x4D, 0x34, 0x41, 0x20,
+            0, 0, 0, 12, 0x6D, 0x64, 0x61, 0x74, 1, 2, 3, 4
+        ])
+        try write(unfinalized, to: tail)
+        let files = try AudioArchiveMerger.recoveryAudioFiles(in: recoveryAudio)
+        XCTAssertEqual(files.map(\.lastPathComponent), ["000001.m4a"])
+        let moved = try AudioArchiveMerger.merge([good, tail], from: recoveryAudio, into: finalSession.appendingPathComponent("audio"))
+        XCTAssertEqual(moved.map(\.lastPathComponent), ["000001.m4a"])
+        let playbackFiles = SessionAssetResolver.audioURLs(in: finalSession)
+        XCTAssertEqual(
+            playbackFiles.map { $0.resolvingSymlinksInPath() },
+            moved.map { $0.resolvingSymlinksInPath() }
+        )
+        XCTAssertTrue(SessionAudioTimeline.hasContiguousNumberedChunks(playbackFiles))
+        XCTAssertGreaterThan(try AVAudioFile(forReading: XCTUnwrap(playbackFiles.first)).length, 0)
+        XCTAssertEqual(try Data(contentsOf: tail), unfinalized)
+    }
+
+    @MainActor
+    func testArchiveWritesReadableAudioAtNativeAndFallbackSampleRates() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for bitRate in [96_000, 192_000] {
+            for rate in [8_000.0, 16_000, 24_000, 44_100, 48_000, 88_200, 96_000] {
+                let archive = AudioArchiveWriter(directoryURL: root.appendingPathComponent("\(bitRate)-\(rate)"), bitRate: bitRate)
+                let count = Int(rate / 20)
+                let phaseStep = 2 * Double.pi * 440 / rate
+                for packet in 0..<6 {
+                    let samples = (0..<count).map { frame -> Float in
+                        let phase = Double(packet * count + frame) * phaseStep
+                        return Float(sin(phase)) * 0.25
+                    }
+                    try await archive.append(CapturedAudioPacket(
+                        source: .microphone, presentationTime: Double(packet) / 20, sampleRate: rate, samples: samples
+                    ))
+                }
+                let urls = try await archive.finish()
+                XCTAssertEqual(urls.count, 1)
+                let file = try AVAudioFile(forReading: XCTUnwrap(urls.first))
+                let expectedRate = min(rate, 48_000)
+                XCTAssertEqual(file.fileFormat.sampleRate, expectedRate)
+                XCTAssertEqual(Double(file.length) / expectedRate, 0.3, accuracy: 0.002, "Input rate \(rate), bitrate \(bitRate)")
+                let decoded = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 1_024))
+                try file.read(into: decoded)
+                let channel = try XCTUnwrap(decoded.floatChannelData?[0])
+                XCTAssertTrue(UnsafeBufferPointer(start: channel, count: Int(decoded.frameLength)).contains { abs($0) > 0.05 })
+            }
+        }
     }
 
     @MainActor
@@ -182,6 +250,16 @@ final class RecoveryArchiveTests: XCTestCase {
 
     @MainActor
     func testRecoverWithoutAudioKeepsExistingFinalTranscript() async throws {
+        try await checkRecoveryKeepsExistingFinalDocument(withResidualAudio: false)
+    }
+
+    @MainActor
+    func testRecoverWithResidualAudioKeepsExistingFinalTranscriptAndNotes() async throws {
+        try await checkRecoveryKeepsExistingFinalDocument(withResidualAudio: true)
+    }
+
+    @MainActor
+    private func checkRecoveryKeepsExistingFinalDocument(withResidualAudio: Bool) async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let suite = "Prosody-Recovery-Existing-\(UUID())"
@@ -189,7 +267,7 @@ final class RecoveryArchiveTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let preferences = ProsodyPreferences(defaults: defaults)
         preferences.outputFolderPath = root.appendingPathComponent("Sessions").path
-        preferences.generateNotesAutomatically = false
+        preferences.generateNotesAutomatically = withResidualAudio
         preferences.notifyWhenFinished = false
         preferences.wordReplacements = [WordReplacement(original: "durable", replacement: "changed")]
         let model = AppModel(
@@ -205,7 +283,7 @@ final class RecoveryArchiveTests: XCTestCase {
             TranscriptSegment(source: .system, start: 0, end: 1, text: "durable transcript", isFinal: true)
         ])
         let sessions = SessionStore(rootURL: root.appendingPathComponent("Sessions"))
-        _ = try await sessions.save(
+        let finalDirectory = try await sessions.save(
             session: session,
             transcript: durable,
             notesMarkdown: "# Existing notes"
@@ -213,10 +291,12 @@ final class RecoveryArchiveTests: XCTestCase {
         let recovery = RecoveryStore(rootURL: root.appendingPathComponent("Support/Recovery"))
         let manifest = try await recovery.begin(session: session)
         let recoveryDirectory = await recovery.directoryURL(for: session.id)
-        try FileManager.default.createDirectory(
-            at: recoveryDirectory.appendingPathComponent("audio/system", isDirectory: true),
-            withIntermediateDirectories: true
-        )
+        let originalChunk = finalDirectory.appendingPathComponent("audio/microphone/000001.m4a")
+        let residualChunk = recoveryDirectory.appendingPathComponent("audio/microphone/000002.m4a")
+        if withResidualAudio {
+            try writeAudioChunk(to: originalChunk)
+            try writeAudioChunk(to: residualChunk)
+        }
 
         model.recover(manifest)
         await model.transitionTask?.value
@@ -225,6 +305,12 @@ final class RecoveryArchiveTests: XCTestCase {
         XCTAssertEqual(final.transcript.visibleSegments.map(\.text), ["durable transcript"])
         XCTAssertEqual(final.notesMarkdown, "# Existing notes")
         XCTAssertTrue(model.selectedSessionHasNotes)
+        XCTAssertEqual(model.recordingState, .completed(session.id))
+        if withResidualAudio {
+            XCTAssertEqual(SessionAssetResolver.audioURLs(in: finalDirectory).map(\.lastPathComponent),
+                           ["000001.m4a", "000002.m4a"])
+            XCTAssertFalse(FileManager.default.fileExists(atPath: residualChunk.path))
+        }
         let recovered = try await recovery.load(id: session.id)
         XCTAssertEqual(recovered.manifest.state, .completed)
     }
@@ -257,6 +343,25 @@ final class RecoveryArchiveTests: XCTestCase {
             withIntermediateDirectories: true
         )
         try data.write(to: url)
+    }
+
+    @discardableResult
+    private func writeAudioChunk(to url: URL, amplitude: Float = 0.25) throws -> Data {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let settings = url.pathExtension == "caf" ? format.settings : [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC), AVSampleRateKey: 48_000, AVNumberOfChannelsKey: 1
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4_800))
+        buffer.frameLength = buffer.frameCapacity
+        let channel = try XCTUnwrap(buffer.floatChannelData?[0])
+        for frame in 0..<Int(buffer.frameLength) {
+            channel[frame] = amplitude * Float(sin(2 * .pi * 440 * Double(frame) / 48_000))
+        }
+        try file.write(from: buffer)
+        file.close()
+        return try Data(contentsOf: url)
     }
 
     private func makeSession(id: UUID, keepAudio: Bool) -> RecordingSession {

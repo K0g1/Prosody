@@ -9,6 +9,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionWindow: NSWindow?
     private var shortcutRefresh: AnyCancellable?
     private var privacySettingsWereActive = false
+    private var terminationTask: Task<Void, Never>?
     private let showsDebugControls = ProcessInfo.processInfo.arguments.contains("--show-controls")
 
     public func applicationWillFinishLaunching(_ notification: Notification) {
@@ -71,6 +72,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return flag
+    }
+
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationTask != nil { return .terminateLater }
+        let model = AppModel.shared
+        guard model.needsTimeToTerminate else { return .terminateNow }
+        shortcutRefresh?.cancel()
+        terminationTask = Task { @MainActor in
+            await model.prepareForTermination()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     public func applicationWillTerminate(_ notification: Notification) {

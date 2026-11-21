@@ -371,6 +371,20 @@ final class DictationQueueTests: XCTestCase {
                                fixture.deliveries.fulfilled], timeout: 0.1)
     }
 
+    func testShortcutReadinessFollowsMonitorRestoration() async throws {
+        let monitors = ShortcutMonitorStore()
+        let fixture = makeFixture(deliveryCount: 1, shortcutMonitorStore: monitors)
+        fixture.controller.configureShortcut()
+        await waitForMonitorCount(monitors, 1)
+        let monitor = try XCTUnwrap(monitors.created.first?.monitor)
+        XCTAssertTrue(fixture.controller.shortcutReady)
+
+        monitor.reportAvailability(false)
+        XCTAssertFalse(fixture.controller.shortcutReady)
+        monitor.reportAvailability(true)
+        XCTAssertTrue(fixture.controller.shortcutReady)
+    }
+
     func testShortcutChangeWaitsForIdleAndGestureRelease() async throws {
         let settings = ShortcutSettings()
         let monitors = ShortcutMonitorStore()
@@ -839,12 +853,7 @@ final class DictationQueueTests: XCTestCase {
                 if let shortcutMonitorStore {
                     return shortcutMonitorStore.make(shortcut: shortcut, callbacks: callbacks)
                 }
-                return DictationShortcutMonitor(
-                    shortcut: shortcut,
-                    changed: callbacks.changed,
-                    cancel: callbacks.cancel,
-                    resetGesture: callbacks.resetGesture
-                )
+                return DictationShortcutMonitor(shortcut: shortcut, callbacks: callbacks)
             },
             copyText: { text in
                 if let copyText { copyText(text) }
@@ -1026,6 +1035,10 @@ private final class TestShortcutMonitor: DictationShortcutMonitoring {
     func start() -> Bool {
         startCount += 1
         return true
+    }
+
+    func reportAvailability(_ isReady: Bool) {
+        callbacks.availabilityChanged(isReady)
     }
 
     func stop() {

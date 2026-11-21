@@ -36,6 +36,7 @@ struct NotesSettingsView: SettingsSearchPage {
     @ObservedObject var preferences: ProsodyPreferences
     @State private var apiKey = ""
     @State private var connectionMessage: String?
+    @State private var connectionTest: Task<Void, Never>?
 
     private static let providers = [
         LLMProviderDescriptor(id: "template-local", displayName: "Offline Outline", detail: "Organizes the transcript without an AI model", isRemote: false),
@@ -57,8 +58,11 @@ struct NotesSettingsView: SettingsSearchPage {
               help: "Offline Outline needs no AI model. Use a server provider to configure a model and connection.",
               keywords: providers.flatMap { [$0.displayName, $0.detail] } + ["LLM"]) { pane, entry in
             Picker("Notes \(entry.title.lowercased())", selection: pane.$preferences.notesProviderID) {
-                ForEach(providers.filter { !pane.preferences.localOnlyMode || !$0.isRemote }) { provider in
+                ForEach(providers.filter {
+                    !pane.preferences.localOnlyMode || !$0.isRemote || $0.id == pane.preferences.notesProviderID
+                }) { provider in
                     Text(provider.displayName).tag(provider.id)
+                        .disabled(pane.preferences.localOnlyMode && provider.isRemote)
                 }
             }
             .labelsHidden().pickerStyle(.menu)
@@ -95,8 +99,8 @@ struct NotesSettingsView: SettingsSearchPage {
     private static let connectionActions: [SettingsControl<Self>] = [
         .custom("clippy.settings.notes.save-api-key", "Save API Key", keywords: ["credentials", "keychain"]) { pane, entry in
             Button(entry.title) {
+                pane.clearConnectionTest()
                 pane.model.saveProviderAPIKey(pane.apiKey)
-                pane.connectionMessage = "Saved securely"
             }
             .buttonStyle(ThemedControlButtonStyle())
             .accessibilityIdentifier(entry.id)
@@ -104,12 +108,17 @@ struct NotesSettingsView: SettingsSearchPage {
         .custom("clippy.settings.notes.test-connection", "Test Connection", keywords: ["verify", "server", "endpoint"]) { pane, entry in
             Button(entry.title) {
                 pane.connectionMessage = "Testing…"
-                Task { @MainActor in
-                    pane.connectionMessage = await pane.model.testNotesConnection()
+                pane.connectionTest = Task { @MainActor in
+                    guard !Task.isCancelled else { return }
+                    let message = await pane.model.testNotesConnection()
+                    guard !Task.isCancelled else { return }
+                    pane.connectionTest = nil
+                    pane.connectionMessage = message
                 }
             }
             .buttonStyle(.borderedProminent)
             .accessibilityIdentifier(entry.id)
+            .disabled(pane.connectionTest != nil)
         }
     ]
 
@@ -117,6 +126,12 @@ struct NotesSettingsView: SettingsSearchPage {
     static let controlsForSearch = generation.searchEntries + connectionEntries
 
     private var usesServer: Bool { preferences.notesProviderID != "template-local" }
+
+    private var usesRemoteEndpoint: Bool {
+        guard usesServer, let url = try? SafeURLValidator.validate(preferences.notesBaseURL),
+              let host = url.host else { return false }
+        return !SafeURLValidator.isLoopbackHost(host)
+    }
 
     private var showConnection: Bool {
         usesServer || Self.connectionEntries.contains { $0.id == request?.id.control }
@@ -131,8 +146,9 @@ struct NotesSettingsView: SettingsSearchPage {
         VStack(alignment: .leading, spacing: 22) {
             SettingsPageHeader(title: "Notes")
             Self.generation.render(in: self)
-            if Self.providers.first(where: { $0.id == preferences.notesProviderID })?.isRemote == true {
-                Label("Generating notes sends the transcript to the remote provider.", systemImage: "info.circle")
+            if usesRemoteEndpoint {
+                Label(preferences.localOnlyMode ? "Local-only mode blocks remote notes requests." :
+                      "Generating notes sends the transcript to the remote provider.", systemImage: "info.circle")
                     .font(.callout).foregroundStyle(palette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -141,7 +157,7 @@ struct NotesSettingsView: SettingsSearchPage {
         .onAppear { apiKey = model.providerAPIKey() }
         .onChange(of: preferences.notesProviderID) { _, provider in
             apiKey = model.providerAPIKey(for: provider)
-            connectionMessage = nil
+            clearConnectionTest()
             if provider == "openai" {
                 preferences.notesBaseURL = "https://api.openai.com/v1"
                 preferences.notesModelID = "gpt-4o-mini"
@@ -150,6 +166,15 @@ struct NotesSettingsView: SettingsSearchPage {
                 preferences.notesModelID = "qwen3-4b"
             }
         }
+        .onChange(of: preferences.notesBaseURL) { clearConnectionTest() }
+        .onChange(of: preferences.localOnlyMode) { clearConnectionTest() }
+        .onDisappear { clearConnectionTest() }
+    }
+
+    private func clearConnectionTest() {
+        connectionTest?.cancel()
+        connectionTest = nil
+        connectionMessage = nil
     }
 
     private var connectionControls: some View {

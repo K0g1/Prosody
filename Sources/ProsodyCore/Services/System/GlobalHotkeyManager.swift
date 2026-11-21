@@ -22,11 +22,11 @@ public enum GlobalHotkeyError: LocalizedError, Sendable {
 /// frontmost, which is what makes the setting genuinely global for a
 /// menu-bar-only application.
 @MainActor
-public final class GlobalHotkeyManager: @unchecked Sendable {
+public final class GlobalHotkeyManager {
     private static let signature: OSType = 0x434C5059 // "CLPY"
+    private static var nextID: UInt32 = 0
 
-    private var hotKeyRef: EventHotKeyRef?
-    private var handlerRef: EventHandlerRef?
+    private let registration: Registration
     private let callback: @MainActor @Sendable () -> Void
 
     static func supports(_ shortcut: String) -> Bool {
@@ -37,73 +37,91 @@ public final class GlobalHotkeyManager: @unchecked Sendable {
         shortcut: String,
         callback: @escaping @MainActor @Sendable () -> Void
     ) throws {
+        let parsed = try ShortcutParser.parse(shortcut)
+        Self.nextID &+= 1
         self.callback = callback
-        try register(shortcut: shortcut)
+        registration = Registration(id: Self.nextID)
+        try registration.start(shortcut: parsed, manager: self)
     }
 
     public func stop() {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-            self.hotKeyRef = nil
-        }
-        if let handlerRef {
-            RemoveEventHandler(handlerRef)
-            self.handlerRef = nil
+        registration.stop()
+    }
+
+    deinit {
+        let registration = registration
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { registration.stop() }
+        } else {
+            Task { @MainActor in registration.stop() }
         }
     }
 
-    private func register(shortcut: String) throws {
-        let parsed = try ShortcutParser.parse(shortcut)
-        var eventSpec = EventTypeSpec(
-            eventClass: UInt32(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
+    @MainActor
+    private final class Registration {
+        let id: UInt32
+        // The context outlives its weak owner until the main-thread teardown.
+        weak var manager: GlobalHotkeyManager?
+        private var hotKey: EventHotKeyRef?
+        private var handler: EventHandlerRef?
 
-        let userData = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        var newHandler: EventHandlerRef?
-        let handlerStatus = InstallEventHandler(
-            GetApplicationEventTarget(),
-            Self.eventHandler,
-            1,
-            &eventSpec,
-            userData,
-            &newHandler
-        )
-        guard handlerStatus == noErr else {
-            throw GlobalHotkeyError.registrationFailed(handlerStatus)
-        }
+        init(id: UInt32) { self.id = id }
 
-        var newHotKey: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: Self.signature, id: 1)
-        let hotKeyStatus = RegisterEventHotKey(
-            parsed.keyCode,
-            parsed.modifiers,
-            hotKeyID,
-            GetApplicationEventTarget(),
-            OptionBits(kEventHotKeyNoOptions),
-            &newHotKey
-        )
-        guard hotKeyStatus == noErr else {
-            if let newHandler {
-                RemoveEventHandler(newHandler)
+        func start(shortcut: ParsedShortcut, manager: GlobalHotkeyManager) throws {
+            let target = GetApplicationEventTarget()
+            var eventSpec = EventTypeSpec(
+                eventClass: UInt32(kEventClassKeyboard),
+                eventKind: UInt32(kEventHotKeyPressed)
+            )
+            let handlerStatus = InstallEventHandler(
+                target, Self.handle, 1, &eventSpec, Unmanaged.passUnretained(self).toOpaque(), &handler
+            )
+            guard handlerStatus == noErr else {
+                throw GlobalHotkeyError.registrationFailed(handlerStatus)
             }
-            throw GlobalHotkeyError.registrationFailed(hotKeyStatus)
+
+            let hotKeyID = EventHotKeyID(signature: GlobalHotkeyManager.signature, id: id)
+            let hotKeyStatus = RegisterEventHotKey(
+                shortcut.keyCode, shortcut.modifiers, hotKeyID, target, OptionBits(kEventHotKeyNoOptions), &hotKey
+            )
+            guard hotKeyStatus == noErr else {
+                stop()
+                throw GlobalHotkeyError.registrationFailed(hotKeyStatus)
+            }
+            self.manager = manager
         }
 
-        handlerRef = newHandler
-        hotKeyRef = newHotKey
-    }
-
-    private static let eventHandler: EventHandlerUPP = { _, _, userData in
-        guard let userData else { return OSStatus(eventNotHandledErr) }
-        let manager = Unmanaged<GlobalHotkeyManager>
-            .fromOpaque(userData)
-            .takeUnretainedValue()
-
-        Task { @MainActor in
-            manager.callback()
+        func stop() {
+            manager = nil
+            if let hotKey { UnregisterEventHotKey(hotKey) }
+            if let handler { RemoveEventHandler(handler) }
+            hotKey = nil
+            handler = nil
         }
-        return noErr
+
+        private static let handle: EventHandlerUPP = { _, event, context in
+            guard let event, let context else { return OSStatus(eventNotHandledErr) }
+            var identifier = EventHotKeyID()
+            let status = GetEventParameter(
+                event, UInt32(kEventParamDirectObject), UInt32(typeEventHotKeyID),
+                nil, MemoryLayout<EventHotKeyID>.size, nil, &identifier
+            )
+            guard status == noErr, identifier.signature == GlobalHotkeyManager.signature else {
+                return OSStatus(eventNotHandledErr)
+            }
+            let registration = Unmanaged<Registration>.fromOpaque(context).takeUnretainedValue()
+            let id = identifier.id
+            // Carbon delivers application-target hotkey events on the main run loop.
+            return MainActor.assumeIsolated {
+                guard id == registration.id, registration.manager != nil else {
+                    return OSStatus(eventNotHandledErr)
+                }
+                Task { @MainActor [weak registration] in
+                    registration?.manager?.callback()
+                }
+                return noErr
+            }
+        }
     }
 }
 

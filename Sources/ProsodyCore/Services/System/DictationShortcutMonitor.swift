@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 @preconcurrency import Carbon.HIToolbox
 import IOKit.hidsystem
+import OSLog
 
 public enum DictationShortcut: String, Codable, CaseIterable, Identifiable, Sendable {
     case rightCommand = "Right Command"
@@ -20,6 +21,7 @@ struct DictationShortcutMonitorCallbacks {
     let changed: (Bool) -> Void
     let cancel: () -> Bool
     let resetGesture: () -> Void
+    let availabilityChanged: (Bool) -> Void
 }
 
 @MainActor
@@ -50,6 +52,19 @@ struct DictationShortcutInput {
         case .rightOption: return CGKeyCode(kVK_RightOption)
         case .controlOptionSpace: return CGKeyCode(kVK_Space)
         }
+    }
+
+    var tracksRelease: Bool { press != .up || ownsEscape }
+
+    mutating func recoverMissingReleases(shortcutKeyDown: Bool, escapeKeyDown: Bool, flags: CGEventFlags) -> Bool {
+        let lostGesture = press == .reported &&
+            (!shortcutKeyDown || (shortcut == .controlOptionSpace && !flags.contains([.maskControl, .maskAlternate])))
+        if !shortcutKeyDown || lostGesture {
+            resynchronize(shortcutKeyDown: shortcutKeyDown, escapeKeyDown: escapeKeyDown)
+        } else if !escapeKeyDown {
+            ownsEscape = false
+        }
+        return lostGesture
     }
 
     mutating func resynchronize(shortcutKeyDown: Bool, escapeKeyDown: Bool = false) {
@@ -148,73 +163,185 @@ struct DictationShortcutInput {
 /// it never stores keys or text. Escape is consumed only during dictation.
 @MainActor
 final class DictationShortcutMonitor: DictationShortcutMonitoring {
-    private var tap: CFMachPort?
-    private var source: CFRunLoopSource?
+    private var tap: EventTap?
+    private var releaseCheck: Task<Void, Never>?
     private var input: DictationShortcutInput
     private let changed: (Bool) -> Void
     private let cancel: () -> Bool
     private let resetGesture: () -> Void
+    private let availabilityChanged: (Bool) -> Void
 
-    init(shortcut: DictationShortcut, changed: @escaping (Bool) -> Void, cancel: @escaping () -> Bool,
-         resetGesture: @escaping () -> Void = {}) {
+    init(shortcut: DictationShortcut, callbacks: DictationShortcutMonitorCallbacks) {
         input = DictationShortcutInput(shortcut: shortcut)
-        self.changed = changed
-        self.cancel = cancel
-        self.resetGesture = resetGesture
+        changed = callbacks.changed
+        cancel = callbacks.cancel
+        resetGesture = callbacks.resetGesture
+        availabilityChanged = callbacks.availabilityChanged
     }
 
     func start() -> Bool {
         stop()
-        let mask = [CGEventType.flagsChanged, .keyDown, .keyUp].reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
-        tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
-            options: .defaultTap, eventsOfInterest: mask, callback: { _, type, event, context in
-                guard let context else { return Unmanaged.passUnretained(event) }
-                let consumed = MainActor.assumeIsolated {
-                    let monitor = Unmanaged<DictationShortcutMonitor>.fromOpaque(context).takeUnretainedValue()
-                    return monitor.handle(type: type, event: event)
-                }
-                return consumed ? nil : Unmanaged.passUnretained(event)
-            }, userInfo: Unmanaged.passUnretained(self).toOpaque())
-        guard let tap, let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
-            stop()
-            return false
-        }
-        self.source = source
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        let tap = EventTap()
+        guard tap.start(monitor: self) else { return false }
+        self.tap = tap
         input.resynchronize(shortcutKeyDown: keyIsDown(input.keyCode))
+        checkForMissingReleaseIfNeeded()
         return true
     }
 
     func stop() {
-        let hadTap = tap != nil || source != nil
-        if let tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
-        if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
-        source = nil
+        releaseCheck?.cancel()
+        releaseCheck = nil
+        let hadTap = tap != nil
+        tap?.stop()
         tap = nil
         input = DictationShortcutInput(shortcut: input.shortcut)
         if hadTap { resetGesture() }
     }
 
-    private func handle(type: CGEventType, event: CGEvent) -> Bool {
+    deinit {
+        releaseCheck?.cancel()
+        guard let tap else { return }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { tap.stop() }
+        } else {
+            Task { @MainActor in tap.stop() }
+        }
+    }
+
+    private func handle(type: CGEventType, key: Int64, flags: CGEventFlags, repeating: Bool) -> Bool {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
-            let shortcutDown = keyIsDown(input.keyCode)
-            let escapeDown = keyIsDown(CGKeyCode(kVK_Escape))
-            input.tapInterrupted(shortcutKeyDown: shortcutDown, escapeKeyDown: escapeDown, cancel: cancel)
-            resetGesture()
+            recoverTap()
             return false
         }
-        let key = event.getIntegerValueField(.keyboardEventKeycode)
         let keyCode = input.keyCode
-        let decision = input.keyEvent(type, key: key, flags: event.flags,
-            repeating: type == .keyDown && event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
-            shortcutKeyDown: keyIsDown(keyCode), cancel: cancel)
+        let decision = input.keyEvent(type, key: key, flags: flags, repeating: repeating,
+                                      shortcutKeyDown: keyIsDown(keyCode), cancel: cancel)
         if let down = decision.changed { changed(down) }
+        checkForMissingReleaseIfNeeded()
         return decision.consumed
+    }
+
+    private func recoverTap() {
+        guard let tap else { return }
+        input.tapInterrupted(
+            shortcutKeyDown: CGEventSource.keyState(.hidSystemState, key: input.keyCode),
+            escapeKeyDown: CGEventSource.keyState(.hidSystemState, key: CGKeyCode(kVK_Escape)),
+            cancel: cancel
+        )
+        resetGesture()
+        if tap.enable() {
+            availabilityChanged(true)
+        } else {
+            // Leave the current callback before disposing of its run-loop source.
+            Task { @MainActor [weak self, weak tap] in
+                guard let self, let tap, self.tap === tap else { return }
+                if !tap.enable() {
+                    let replacement = EventTap()
+                    guard replacement.start(monitor: self) else {
+                        self.availabilityChanged(false)
+                        Logger(subsystem: AppConstants.bundleIdentifier, category: "dictation-shortcut")
+                            .error("Could not restore the dictation shortcut event tap")
+                        return
+                    }
+                    tap.stop()
+                    self.tap = replacement
+                }
+                self.availabilityChanged(true)
+            }
+        }
+        checkForMissingReleaseIfNeeded()
+    }
+
+    private func checkForMissingReleaseIfNeeded() {
+        guard releaseCheck == nil, input.tracksRelease else { return }
+        releaseCheck = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                guard let self else { return }
+                // HID state includes Space presses consumed by this session tap.
+                if self.input.recoverMissingReleases(
+                    shortcutKeyDown: CGEventSource.keyState(.hidSystemState, key: self.input.keyCode),
+                    escapeKeyDown: CGEventSource.keyState(.hidSystemState, key: CGKeyCode(kVK_Escape)),
+                    flags: CGEventSource.flagsState(.hidSystemState)
+                ) {
+                    _ = self.cancel()
+                    self.resetGesture()
+                }
+                if !self.input.tracksRelease {
+                    self.releaseCheck = nil
+                    return
+                }
+            }
+        }
     }
 
     private func keyIsDown(_ key: CGKeyCode) -> Bool {
         CGEventSource.keyState(.combinedSessionState, key: key)
+    }
+
+    @MainActor
+    private final class EventTap {
+        private weak var monitor: DictationShortcutMonitor?
+        private var port: CFMachPort?
+        private var source: CFRunLoopSource?
+        private var observers: [any NSObjectProtocol] = []
+
+        func start(monitor: DictationShortcutMonitor) -> Bool {
+            self.monitor = monitor
+            let mask = [CGEventType.flagsChanged, .keyDown, .keyUp].reduce(CGEventMask(0)) { $0 | (1 << $1.rawValue) }
+            port = CGEvent.tapCreate(
+                tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                eventsOfInterest: mask, callback: Self.handle, userInfo: Unmanaged.passUnretained(self).toOpaque()
+            )
+            guard let port, let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0) else {
+                stop()
+                return false
+            }
+            self.source = source
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+            guard enable() else {
+                stop()
+                return false
+            }
+            let center = NSWorkspace.shared.notificationCenter
+            for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+                observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.monitor?.recoverTap() }
+                })
+            }
+            return true
+        }
+
+        func enable() -> Bool {
+            guard let port, CFMachPortIsValid(port) else { return false }
+            CGEvent.tapEnable(tap: port, enable: true)
+            return CGEvent.tapIsEnabled(tap: port)
+        }
+
+        func stop() {
+            monitor = nil
+            for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+            observers.removeAll()
+            if let port {
+                CGEvent.tapEnable(tap: port, enable: false)
+                CFMachPortInvalidate(port)
+            }
+            if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+            port = nil
+            source = nil
+        }
+
+        private static let handle: CGEventTapCallBack = { _, type, event, context in
+            guard let context else { return Unmanaged.passUnretained(event) }
+            let tap = Unmanaged<EventTap>.fromOpaque(context).takeUnretainedValue()
+            let key = event.getIntegerValueField(.keyboardEventKeycode)
+            let flags = event.flags
+            let repeating = type == .keyDown && event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            let consumed = MainActor.assumeIsolated {
+                tap.monitor?.handle(type: type, key: key, flags: flags, repeating: repeating) ?? false
+            }
+            return consumed ? nil : Unmanaged.passUnretained(event)
+        }
     }
 }

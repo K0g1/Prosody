@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+@preconcurrency import Carbon.HIToolbox
 import OSLog
 
 public enum DictationInsertionMethod: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -57,6 +58,51 @@ enum DictationSelectionRebase {
     }
 }
 
+enum DictationKeyboardInput {
+    private static let modifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
+
+    static var modifiersAreClear: Bool {
+        CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty
+    }
+
+    static var canDispatch: Bool { !IsSecureEventInputEnabled() && modifiersAreClear }
+
+    @MainActor
+    static func pasteKeyCode(in inputSource: TISInputSource, keyboardType: UInt32) -> CGKeyCode? {
+        guard let rawData = TISGetInputSourceProperty(inputSource, kTISPropertyUnicodeKeyLayoutData) else { return nil }
+        let data = Unmanaged<CFData>.fromOpaque(rawData).takeUnretainedValue()
+        guard let bytes = CFDataGetBytePtr(data) else { return nil }
+        return withExtendedLifetime(data) {
+            let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+            var buffer = [UniChar](repeating: 0, count: 4)
+            for key in UInt16(0)..<128 {
+                var deadKeyState: UInt32 = 0
+                var length = 0
+                let status = UCKeyTranslate(
+                    layout, key, UInt16(kUCKeyActionDown), UInt32(cmdKey) >> 8, keyboardType,
+                    OptionBits(kUCKeyTranslateNoDeadKeysMask), &deadKeyState, buffer.count, &length, &buffer
+                )
+                // Match both "v" and "V" in the Command-modified layout.
+                if status == noErr, length == 1, buffer[0] == 0x76 || buffer[0] == 0x56 { return key }
+            }
+            return nil
+        }
+    }
+
+    static func typingEvents(for text: Substring, source: CGEventSource) -> (down: CGEvent, up: CGEvent)? {
+        // This event carries text without claiming a physical letter key.
+        let unicodeKey: CGKeyCode = 0xff
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: unicodeKey, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: unicodeKey, keyDown: false) else { return nil }
+        down.flags = []
+        up.flags = []
+        Array(text.utf16).withUnsafeBufferPointer { units in
+            down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units.baseAddress)
+        }
+        return (down, up)
+    }
+}
+
 /// Capture focus before the nonactivating HUD appears. AX metadata is optional:
 /// custom controls often support paste without exposing a selected-text range.
 @MainActor
@@ -95,6 +141,7 @@ struct DictationTextDestination {
             logger.info("Insertion deferred: empty text or Accessibility unavailable")
             return false
         }
+        guard !IsSecureEventInputEnabled() else { return false }
         if gestureIsHeld() {
             await waitForGestureRelease()
             guard !Task.isCancelled else { return false }
@@ -102,15 +149,14 @@ struct DictationTextDestination {
         // A toggle shortcut can finish while Command/Option is still held.
         // Wait for release rather than sending Command+Option+V or modifying
         // the user's physical modifier state.
-        let modifiers: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift]
-        if !CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty {
+        if !DictationKeyboardInput.modifiersAreClear {
             // Check the destination before suspending and again after the wait.
             guard destinationIsCurrent() else {
                 logger.info("Insertion deferred: destination changed")
                 return false
             }
             for _ in 0..<30 {
-                if CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty { break }
+                if DictationKeyboardInput.modifiersAreClear { break }
                 do { try await Task.sleep(for: .milliseconds(40)) } catch { return false }
             }
         }
@@ -121,8 +167,8 @@ struct DictationTextDestination {
             await waitForGestureRelease()
             guard !Task.isCancelled else { return false }
         }
-        guard CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty else {
-            logger.info("Insertion deferred: modifier keys are still held")
+        guard !Task.isCancelled, DictationKeyboardInput.canDispatch else {
+            logger.info("Insertion deferred: keyboard state changed")
             return false
         }
         let originalSelection = selectedRange
@@ -149,12 +195,7 @@ struct DictationTextDestination {
             if inserted && keepOnClipboard { Self.copy(insertionText) }
             return inserted
         }
-        guard let source = CGEventSource(stateID: .privateState),
-              let commandDown = CGEvent(keyboardEventSource: source, virtualKey: 55, keyDown: true),
-              let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false),
-              let commandUp = CGEvent(keyboardEventSource: source, virtualKey: 55, keyDown: false) else { return false }
-        guard applicationIsCurrent else {
+        guard applicationIsCurrent, !IsSecureEventInputEnabled() else {
             logger.info("Insertion deferred: the original app is no longer active")
             return false
         }
@@ -163,8 +204,7 @@ struct DictationTextDestination {
         // A clipboard owner may be slow to provide its data. Do the focus and
         // selection check after that work, as close to dispatch as possible.
         let validation = validateDestination()
-        guard CGEventSource.flagsState(.combinedSessionState).intersection(modifiers).isEmpty,
-              validation.isCurrent else {
+        guard validation.isCurrent, DictationKeyboardInput.canDispatch else {
             logger.info("Insertion deferred: destination or keyboard state changed")
             return false
         }
@@ -175,9 +215,17 @@ struct DictationTextDestination {
             smartCapitalization: smartCapitalization
         )
         let receipt = insertionReceipt(for: insertionText, originalSelection: originalSelection)
+        guard let source = CGEventSource(stateID: .privateState),
+              let layout = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let pasteKey = DictationKeyboardInput.pasteKeyCode(in: layout, keyboardType: source.keyboardType),
+              let commandDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Command), keyDown: true),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: pasteKey, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: pasteKey, keyDown: false),
+              let commandUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Command), keyDown: false),
+              !Task.isCancelled, applicationIsCurrent, DictationKeyboardInput.canDispatch else { return false }
         let ourChange = pasteboard.clearContents()
         guard pasteboard.setString(insertionText, forType: .string), pasteboard.changeCount == ourChange,
-              applicationIsCurrent else {
+              applicationIsCurrent, DictationKeyboardInput.canDispatch else {
             previous?.restore(ifUnchangedSince: ourChange)
             logger.info("Insertion deferred: the clipboard or original app changed before paste")
             return false
@@ -274,16 +322,10 @@ struct DictationTextDestination {
             }
             guard !Task.isCancelled, destinationIsCurrent(checkSelection: false) else { return false }
             let end = text.index(start, offsetBy: 12, limitedBy: text.endIndex) ?? text.endIndex
-            let units = Array(text[start..<end].utf16)
-            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { return false }
-            down.flags = []; up.flags = []
-            units.withUnsafeBufferPointer { buffer in
-                guard let pointer = buffer.baseAddress else { return }
-                down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: pointer)
-                up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: pointer)
-            }
-            down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
+            guard let events = DictationKeyboardInput.typingEvents(for: text[start..<end], source: source),
+                  DictationKeyboardInput.canDispatch else { return false }
+            events.down.post(tap: .cghidEventTap)
+            events.up.post(tap: .cghidEventTap)
             if end == text.endIndex { onDispatched(); return true }
             start = end
             do { try await Task.sleep(for: .milliseconds(12)) } catch { return false }
@@ -347,7 +389,7 @@ struct DictationTextDestination {
     /// returned only when the same element's live caret was actually read and
     /// matched the captured range.
     private func validateDestination(checkSelection: Bool = true) -> DestinationValidation {
-        guard applicationIsCurrent else { return .invalid }
+        guard applicationIsCurrent, !IsSecureEventInputEnabled() else { return .invalid }
         let app = AXUIElementCreateApplication(application.processIdentifier)
         AXUIElementSetMessagingTimeout(app, 0.25)
         var windowIdentityKnown = true

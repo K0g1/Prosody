@@ -16,6 +16,7 @@ public enum ScreenCaptureCoordinatorError: Error, LocalizedError, Equatable, Sen
     case startFailed(String)
     case sampleConversionFailed
     case bufferOverrun
+    case pauseDrainTimedOut
 
     public var errorDescription: String? {
         switch self {
@@ -28,6 +29,8 @@ public enum ScreenCaptureCoordinatorError: Error, LocalizedError, Equatable, Sen
         case .startFailed(let message): return message
         case .bufferOverrun: return "Transcription could not keep up with capture. The recording was stopped; recover the saved transcript in Prosody."
         case .sampleConversionFailed: return "Prosody could not read an audio sample from macOS."
+        case .pauseDrainTimedOut:
+            return "Audio processing stalled while pausing. Recover the saved part of the recording in Prosody."
         }
     }
 }
@@ -163,9 +166,7 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
         // Drain framework callbacks and the consumer before closing the clock
         // epoch. Otherwise a pause discards the audio waiting behind inference.
         await drainOutputCallbacks(sources: mode.sources)
-        while pendingPacketCount() > 0, currentModeSnapshot() != nil {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        try await waitForPendingPackets(until: ContinuousClock.now.advanced(by: .seconds(5)))
 #else
         throw ScreenCaptureCoordinatorError.unavailable
 #endif
@@ -283,13 +284,11 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
         case .microphone: source = .microphone
         default: return
         }
-        guard let packet = Self.packet(from: sampleBuffer, source: source) else { return }
-        enqueue(packet, producer: ObjectIdentifier(stream))
+        receive(sampleBuffer, source: source, producer: ObjectIdentifier(stream))
     }
 
     public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let packet = Self.packet(from: sampleBuffer, source: .microphone) else { return }
-        enqueue(packet, producer: ObjectIdentifier(output))
+        receive(sampleBuffer, source: .microphone, producer: ObjectIdentifier(output))
     }
 
     public func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -311,80 +310,82 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
         AppLogger.capture.error("Capture stopped: \(failure.localizedDescription, privacy: .private)")
     }
 
-    private static func packet(from sampleBuffer: CMSampleBuffer, source: AudioSource) -> CapturedAudioPacket? {
+    private func receive(_ sampleBuffer: CMSampleBuffer, source: AudioSource, producer: ObjectIdentifier) {
+        guard CMSampleBufferIsValid(sampleBuffer), CMSampleBufferDataIsReady(sampleBuffer),
+              CMSampleBufferGetNumSamples(sampleBuffer) > 0 else { return }
+        guard let packet = Self.packet(from: sampleBuffer, source: source) else {
+            captureDidFail(producer: producer, failure: .sampleConversionFailed)
+            return
+        }
+        enqueue(packet, producer: producer)
+    }
+
+    static func packet(from sampleBuffer: CMSampleBuffer, source: AudioSource) -> CapturedAudioPacket? {
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
-        guard timestamp.isFinite, timestamp >= 0,
+        let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard timestamp.isFinite, timestamp >= 0, frameCount > 0,
               let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee
+              let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee,
+              streamDescription.mSampleRate.isFinite, streamDescription.mSampleRate > 0,
+              let format = CapturePCMFormat(streamDescription)
         else { return nil }
 
-        let bufferCount = max(1, Int(streamDescription.mChannelsPerFrame))
-        let byteCount = MemoryLayout<AudioBufferList>.size + max(0, bufferCount - 1) * MemoryLayout<AudioBuffer>.stride
+        var byteCount = 0
+        let flags = UInt32(kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment)
+        let sizeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer, bufferListSizeNeededOut: &byteCount, bufferListOut: nil,
+            bufferListSize: 0, blockBufferAllocator: nil, blockBufferMemoryAllocator: nil,
+            flags: flags, blockBufferOut: nil
+        )
+        guard sizeStatus == noErr, byteCount >= MemoryLayout<AudioBufferList>.size else { return nil }
         let rawList = UnsafeMutableRawPointer.allocate(
-            byteCount: byteCount,
-            alignment: MemoryLayout<AudioBufferList>.alignment
+            byteCount: byteCount, alignment: MemoryLayout<AudioBufferList>.alignment
         )
         defer { rawList.deallocate() }
         let bufferList = rawList.bindMemory(to: AudioBufferList.self, capacity: 1)
         var retainedBlockBuffer: CMBlockBuffer?
         let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            bufferListSizeNeededOut: nil,
-            bufferListOut: bufferList,
-            bufferListSize: byteCount,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: 0,
-            blockBufferOut: &retainedBlockBuffer
+            sampleBuffer, bufferListSizeNeededOut: nil, bufferListOut: bufferList,
+            bufferListSize: byteCount, blockBufferAllocator: nil, blockBufferMemoryAllocator: nil,
+            flags: flags, blockBufferOut: &retainedBlockBuffer
         )
         guard status == noErr else { return nil }
-        // The list can point into the retained block rather than the original
-        // sample. Keep the backing storage alive until all PCM has been copied.
         defer { withExtendedLifetime(retainedBlockBuffer) {} }
 
         let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
-        var channels: [[Float]] = []
-        channels.reserveCapacity(buffers.count)
-        let isFloat = (streamDescription.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-        let isSignedInteger = (streamDescription.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0
-        let bitsPerChannel = Int(streamDescription.mBitsPerChannel)
-
+        var channelCount = 0
         for buffer in buffers {
-            guard let data = buffer.mData else { continue }
-            let channelCount = max(1, Int(buffer.mNumberChannels))
-            let rawSamples: [Float]
-            if isFloat && bitsPerChannel == 32 {
-                let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-                rawSamples = Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: Float.self), count: count))
-            } else if isSignedInteger && bitsPerChannel == 16 {
-                let count = Int(buffer.mDataByteSize) / MemoryLayout<Int16>.size
-                rawSamples = UnsafeBufferPointer(start: data.assumingMemoryBound(to: Int16.self), count: count).map {
-                    Float($0) / Float(Int16.max)
-                }
-            } else {
-                continue
-            }
-
-            if channelCount == 1 {
-                channels.append(rawSamples)
-            } else {
-                for channel in 0..<channelCount {
-                    channels.append(Array(stride(from: channel, to: rawSamples.count, by: channelCount).map { rawSamples[$0] }))
-                }
-            }
+            let channels = Int(buffer.mNumberChannels)
+            guard buffer.mData != nil, channels > 0,
+                  frameCount <= Int(buffer.mDataByteSize) / (channels * format.bytesPerChannel)
+            else { return nil }
+            channelCount += channels
         }
+        guard channelCount == Int(streamDescription.mChannelsPerFrame), channelCount > 0 else { return nil }
 
-        guard let frameCount = channels.map(\.count).min(), frameCount > 0 else { return nil }
+        // Downmix directly into the packet. Keep the existing channel weights
+        // so a change in the signal on one channel does not alter the gain.
         var mono = Array(repeating: Float.zero, count: frameCount)
-        for channel in channels {
-            for index in 0..<frameCount { mono[index] += channel[index] }
+        for buffer in buffers {
+            guard let data = buffer.mData else { return nil }
+            let channels = Int(buffer.mNumberChannels)
+            let bytesPerFrame = channels * format.bytesPerChannel
+            for frame in mono.indices {
+                var sample = data.advanced(by: frame * bytesPerFrame)
+                for _ in 0..<channels {
+                    mono[frame] += format.readSample(at: sample)
+                    sample += format.bytesPerChannel
+                }
+            }
         }
-        let divisor = Float(max(1, channels.count))
-        mono = mono.map { max(-1, min(1, $0 / divisor)) }
+        let divisor = Float(channelCount)
+        for frame in mono.indices {
+            mono[frame] = max(-1, min(1, mono[frame] / divisor))
+        }
         return CapturedAudioPacket(
             source: source,
             presentationTime: timestamp,
-            sampleRate: Double(streamDescription.mSampleRate),
+            sampleRate: streamDescription.mSampleRate,
             samples: mono
         )
     }
@@ -435,13 +436,23 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
         lock.unlock()
     }
 
-    private func pendingPacketCount() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return pendingPackets
+#if canImport(ScreenCaptureKit)
+    func waitForPendingPackets(until deadline: ContinuousClock.Instant) async throws {
+        let clock = ContinuousClock()
+        while true {
+            try Task.checkCancellation()
+            let remaining = try lock.withLock {
+                if let streamFailure { throw streamFailure }
+                guard stopTask == nil else { throw ScreenCaptureCoordinatorError.notRunning }
+                return pendingPackets
+            }
+            guard remaining > 0 else { return }
+            let now = clock.now
+            guard now < deadline else { throw ScreenCaptureCoordinatorError.pauseDrainTimedOut }
+            try await clock.sleep(until: min(deadline, now.advanced(by: .milliseconds(10))))
+        }
     }
 
-#if canImport(ScreenCaptureKit)
     private func activeCapture() throws -> (Backend, CaptureMode) {
         try lock.withLock {
             guard let backend, let currentMode, stopTask == nil, streamFailure == nil else {
@@ -470,4 +481,69 @@ public final class ScreenCaptureCoordinator: NSObject, SCStreamOutput, SCStreamD
         }
     }
 #endif
+}
+
+/// The ASBD specifies both the precision and the storage width. For example,
+/// 24-bit input may use three packed bytes or a four-byte aligned container.
+private struct CapturePCMFormat {
+    let bytesPerChannel: Int
+    private let bitsPerChannel: Int
+    private let isFloat: Bool
+    private let bigEndian: Bool
+    private let alignedHigh: Bool
+
+    init?(_ description: AudioStreamBasicDescription) {
+        let flags = description.mFormatFlags
+        let interleaved = flags & kAudioFormatFlagIsNonInterleaved == 0
+        let channelsPerBuffer = interleaved ? Int(description.mChannelsPerFrame) : 1
+        let bytesPerFrame = Int(description.mBytesPerFrame)
+        guard description.mFormatID == kAudioFormatLinearPCM, channelsPerBuffer > 0,
+              bytesPerFrame.isMultiple(of: channelsPerBuffer) else { return nil }
+        bytesPerChannel = bytesPerFrame / channelsPerBuffer
+        bitsPerChannel = Int(description.mBitsPerChannel)
+        isFloat = flags & kAudioFormatFlagIsFloat != 0
+        bigEndian = flags & kAudioFormatFlagIsBigEndian != 0
+        alignedHigh = flags & kAudioFormatFlagIsAlignedHigh != 0
+
+        if isFloat {
+            guard (bitsPerChannel, bytesPerChannel) == (32, 4) ||
+                  (bitsPerChannel, bytesPerChannel) == (64, 8) else { return nil }
+        } else {
+            guard flags & kAudioFormatFlagIsSignedInteger != 0,
+                  [16, 24, 32].contains(bitsPerChannel),
+                  (bitsPerChannel / 8...4).contains(bytesPerChannel)
+            else { return nil }
+        }
+    }
+
+    func readSample(at data: UnsafeRawPointer) -> Float {
+        if isFloat {
+            let sample: Float
+            if bitsPerChannel == 32 {
+                let bits = data.loadUnaligned(as: UInt32.self)
+                sample = Float(bitPattern: bigEndian ? UInt32(bigEndian: bits) : UInt32(littleEndian: bits))
+            } else {
+                let bits = data.loadUnaligned(as: UInt64.self)
+                sample = Float(Double(bitPattern: bigEndian ? UInt64(bigEndian: bits) : UInt64(littleEndian: bits)))
+            }
+            return sample.isFinite ? sample : 0
+        }
+
+        let raw: UInt32
+        switch bytesPerChannel {
+        case 2:
+            let bits = data.loadUnaligned(as: UInt16.self)
+            raw = UInt32(bigEndian ? UInt16(bigEndian: bits) : UInt16(littleEndian: bits))
+        case 3:
+            let first = UInt32(data.load(as: UInt8.self))
+            let second = UInt32(data.load(fromByteOffset: 1, as: UInt8.self))
+            let third = UInt32(data.load(fromByteOffset: 2, as: UInt8.self))
+            raw = bigEndian ? (first << 16) | (second << 8) | third : (third << 16) | (second << 8) | first
+        default:
+            let bits = data.loadUnaligned(as: UInt32.self)
+            raw = bigEndian ? UInt32(bigEndian: bits) : UInt32(littleEndian: bits)
+        }
+        let shifted = raw << (32 - (alignedHigh ? bytesPerChannel * 8 : bitsPerChannel))
+        return Float(Int32(bitPattern: shifted)) / 2_147_483_648
+    }
 }
